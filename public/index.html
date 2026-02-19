@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Plugin Analytics Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Internal Analytics</p>
+        <h1>Plugin Data Dashboard</h1>
+        <p class="subtitle">
+          Auth + anonymous user behavior, tool usage, time spent, heatmap, and session KPIs.
+        </p>
+      </div>
+      <button id="refreshBtn" class="primary-btn">Refresh</button>
+    </header>
+
+    <section class="filters">
+      <label>
+        Range
+        <select id="rangePreset">
+          <option value="24h">Last 24 hours</option>
+          <option value="7d" selected>Last 7 days</option>
+          <option value="30d">Last 30 days</option>
+          <option value="custom">Custom</option>
+        </select>
+      </label>
+
+      <label>
+        From
+        <input id="fromDate" type="datetime-local" />
+      </label>
+
+      <label>
+        To
+        <input id="toDate" type="datetime-local" />
+      </label>
+
+      <label>
+        Tool
+        <select id="toolFilter">
+          <option value="all">All tools</option>
+        </select>
+      </label>
+
+      <label>
+        User type
+        <select id="authFilter">
+          <option value="all" selected>All</option>
+          <option value="authenticated">Authenticated only</option>
+          <option value="anonymous">Anonymous only</option>
+        </select>
+      </label>
+    </section>
+
+    <section id="kpiGrid" class="kpi-grid"></section>
+
+    <section class="card-grid two-up">
+      <article class="card">
+        <h2>Top Tools (Events)</h2>
+        <canvas id="toolChart" height="200"></canvas>
+      </article>
+      <article class="card">
+        <h2>Events & Sessions by Day</h2>
+        <canvas id="dailyChart" height="200"></canvas>
+      </article>
+    </section>
+
+    <section class="card-grid two-up">
+      <article class="card">
+        <div class="card-title-row">
+          <h2>Click Heatmap</h2>
+          <span id="heatmapCount" class="muted"></span>
+        </div>
+        <div class="heatmap-wrap">
+          <canvas id="heatmapCanvas" width="1033" height="200"></canvas>
+        </div>
+      </article>
+      <article class="card">
+        <h2>Top Actions</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Action</th>
+                <th>Count</th>
+              </tr>
+            </thead>
+            <tbody id="actionsBody"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="card">
+      <h2>Recent Sessions</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Session</th>
+              <th>User</th>
+              <th>Duration</th>
+              <th>Events</th>
+              <th>Tools</th>
+              <th>Last Seen</th>
+            </tr>
+          </thead>
+          <tbody id="sessionsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Recent Events</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Event</th>
+              <th>Tool</th>
+              <th>Source</th>
+              <th>User</th>
+              <th>Session</th>
+            </tr>
+          </thead>
+          <tbody id="eventsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <p id="statusLine" class="status">Loading…</p>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
