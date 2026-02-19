@@ -26,7 +26,8 @@ let loadDebounceTimer = null;
 let activeLoadController = null;
 let currentLoadToken = 0;
 let realtimeRefreshTimer = null;
-const REALTIME_REFRESH_MS = 5000;
+let lastRenderFingerprint = "";
+const REALTIME_REFRESH_MS = 8000;
 
 function setStatus(text, isError = false) {
   statusLine.textContent = text;
@@ -140,9 +141,10 @@ function renderSessions(sessions) {
         ? `${session.user.name || "User"}${session.user.email ? ` (${session.user.email})` : ""}`
         : "Anonymous";
       const tools = Array.isArray(session.tools) ? session.tools.filter(Boolean).join(", ") : "-";
+      const sessionId = String(session.sessionId || "unknown-session");
       return `
         <tr>
-          <td title="${session.sessionId}">${session.sessionId.slice(0, 16)}…</td>
+          <td title="${sessionId}">${sessionId.slice(0, 16)}…</td>
           <td>${user}</td>
           <td>${durationLabel(session.durationMs)}</td>
           <td>${numberLabel(session.eventCount)}</td>
@@ -165,6 +167,7 @@ function renderRecentEvents(events) {
       const user = event.user && event.user.isAuthenticated
         ? event.user.name || event.user.email || "Auth User"
         : "Anonymous";
+      const sessionId = String(event.sessionId || "unknown-session");
       return `
         <tr>
           <td>${new Date(event.eventAt).toLocaleString()}</td>
@@ -172,7 +175,7 @@ function renderRecentEvents(events) {
           <td>${event.tool || "-"}</td>
           <td>${event.source || "-"}</td>
           <td>${user}</td>
-          <td title="${event.sessionId}">${event.sessionId.slice(0, 14)}…</td>
+          <td title="${sessionId}">${sessionId.slice(0, 14)}…</td>
         </tr>
       `;
     })
@@ -425,6 +428,22 @@ async function loadDashboard(options = {}) {
     const toolUsage = dashboard.toolUsage || {};
     const sessions = dashboard.sessions || {};
     const recentEvents = dashboard.recentEvents || {};
+    const nextRenderFingerprint = JSON.stringify({
+      kpis: summary.kpis || {},
+      topActions: summary.topActions || [],
+      eventsByDay: summary.eventsByDay || [],
+      toolUsage: toolUsage.tools || [],
+      heatmap: dashboard.heatmap || {},
+      sessions: sessions.sessions || [],
+      events: recentEvents.events || [],
+    });
+
+    if (silent && nextRenderFingerprint === lastRenderFingerprint) {
+      const elapsedMs = Math.round(performance.now() - startedAt);
+      setStatus(`Updated ${new Date().toLocaleTimeString()} • no changes • ${elapsedMs}ms`);
+      return;
+    }
+    lastRenderFingerprint = nextRenderFingerprint;
 
     renderKpis(summary.kpis || {});
     renderTopActions(summary.topActions || []);

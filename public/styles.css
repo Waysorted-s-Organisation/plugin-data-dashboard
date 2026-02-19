@@ -14,7 +14,8 @@
 }
 
 body {
-  margin: 0;
+  margin: 0 auto;
+  max-width: 1560px;
   padding: 24px;
   background: radial-gradient(circle at 10% 0%, #f9fbff, var(--bg) 55%);
   color: var(--text);
@@ -127,6 +128,7 @@ select {
   border-radius: 12px;
   background: var(--card);
   padding: 12px;
+  overflow: hidden;
 }
 
 h2 {
@@ -142,7 +144,8 @@ h2 {
 
 .chart-wrap {
   position: relative;
-  height: 240px;
+  height: clamp(220px, 32vh, 300px);
+  min-height: 220px;
 }
 
 .chart-wrap canvas {
@@ -160,6 +163,7 @@ h2 {
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
+  max-height: 360px;
 }
 
 table {
