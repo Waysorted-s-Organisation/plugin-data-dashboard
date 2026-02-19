@@ -18,6 +18,10 @@ const publicDir = path.join(__dirname, "..", "public");
 
 const PORT = Number(process.env.PORT || 4080);
 const INGEST_TOKEN = (process.env.ANALYTICS_INGEST_TOKEN || "").trim();
+const INGEST_TOKEN_REQUIRED =
+  String(process.env.ANALYTICS_INGEST_TOKEN_REQUIRED || "")
+    .trim()
+    .toLowerCase() === "true";
 const READ_USER = (process.env.DASHBOARD_BASIC_AUTH_USER || "").trim();
 const READ_PASS = (process.env.DASHBOARD_BASIC_AUTH_PASS || "").trim();
 let initializationPromise = null;
@@ -229,6 +233,14 @@ function ingestAuthGate(req, res, next) {
   if (!INGEST_TOKEN) return next();
 
   const provided = safeString(req.headers["x-plugin-ingest-token"], 240);
+  if (provided === INGEST_TOKEN) {
+    return next();
+  }
+
+  if (!INGEST_TOKEN_REQUIRED) {
+    return next();
+  }
+
   if (provided !== INGEST_TOKEN) {
     return res.status(401).json({ error: "Invalid ingest token" });
   }

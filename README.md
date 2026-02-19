@@ -25,6 +25,7 @@ Set required env values in `.env`:
 - `MONGODB_DB` (optional, defaults to `plugin_data_dashboard`)
 - `PORT` (optional, defaults to `4080`)
 - `ANALYTICS_INGEST_TOKEN` (optional but recommended)
+- `ANALYTICS_INGEST_TOKEN_REQUIRED` (`false` by default; set `true` to enforce token)
 
 Optional read-access lock for dashboard pages/APIs:
 - `DASHBOARD_BASIC_AUTH_USER`
@@ -88,6 +89,13 @@ If `ANALYTICS_INGEST_TOKEN` is set, pass it in header:
 
 ```text
 x-plugin-ingest-token: <token>
+```
+
+By default, ingest token enforcement is relaxed for easier plugin auto-ingest.
+If you need strict enforcement, set:
+
+```text
+ANALYTICS_INGEST_TOKEN_REQUIRED=true
 ```
 
 ## 4) API Endpoints

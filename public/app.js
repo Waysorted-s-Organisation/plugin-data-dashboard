@@ -25,6 +25,8 @@ let dailyChart = null;
 let loadDebounceTimer = null;
 let activeLoadController = null;
 let currentLoadToken = 0;
+let realtimeRefreshTimer = null;
+const REALTIME_REFRESH_MS = 5000;
 
 function setStatus(text, isError = false) {
   statusLine.textContent = text;
@@ -388,7 +390,9 @@ function updateToolFilterOptions(tools) {
   }
 }
 
-async function loadDashboard() {
+async function loadDashboard(options = {}) {
+  const silent = Boolean(options.silent);
+
   if (activeLoadController) {
     activeLoadController.abort();
   }
@@ -403,7 +407,9 @@ async function loadDashboard() {
   params.set("sessionsLimit", "60");
   params.set("eventsLimit", "100");
   const query = params.toString();
-  setStatus("Loading dashboard data…");
+  if (!silent) {
+    setStatus("Loading dashboard data…");
+  }
   const startedAt = performance.now();
 
   try {
@@ -431,11 +437,8 @@ async function loadDashboard() {
 
     const elapsedMs = Math.round(performance.now() - startedAt);
 
-    setStatus(
-      `Updated ${new Date().toLocaleTimeString()} • ${numberLabel(
-        summary.kpis && summary.kpis.totalEvents
-      )} events in range • ${elapsedMs}ms`
-    );
+    const totalEvents = numberLabel(summary.kpis && summary.kpis.totalEvents);
+    setStatus(`Updated ${new Date().toLocaleTimeString()} • ${totalEvents} events • ${elapsedMs}ms`);
   } catch (error) {
     if (error && error.name === "AbortError") {
       return;
@@ -506,11 +509,23 @@ function bindControls() {
   refreshBtn.addEventListener("click", () => loadDashboard());
 }
 
+function startRealtimeRefresh() {
+  if (realtimeRefreshTimer) {
+    clearInterval(realtimeRefreshTimer);
+  }
+
+  realtimeRefreshTimer = setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    loadDashboard({ silent: true });
+  }, REALTIME_REFRESH_MS);
+}
+
 function init() {
   applyPreset("7d");
   authFilterEl.value = "all";
   bindControls();
   loadDashboard();
+  startRealtimeRefresh();
 }
 
 init();

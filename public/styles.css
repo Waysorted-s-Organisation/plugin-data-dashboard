@@ -19,6 +19,7 @@ body {
   background: radial-gradient(circle at 10% 0%, #f9fbff, var(--bg) 55%);
   color: var(--text);
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  overflow-x: hidden;
 }
 
 .page-header {
@@ -139,6 +140,17 @@ h2 {
   justify-content: space-between;
 }
 
+.chart-wrap {
+  position: relative;
+  height: 240px;
+}
+
+.chart-wrap canvas {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+}
+
 .muted {
   color: var(--muted);
   font-size: 12px;
@@ -162,6 +174,8 @@ td {
   padding: 8px;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
+  word-break: break-word;
+  max-width: 280px;
 }
 
 th {
