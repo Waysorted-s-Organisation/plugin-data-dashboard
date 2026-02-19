@@ -16,7 +16,12 @@ cp .env.example .env
 ```
 
 Set required env values in `.env`:
-- `MONGODB_URI`
+- `MONGODB_URI` (recommended)
+- OR one of these supported URI names:
+  - `NEXT_PUBLIC_MONGODB_URI_TOOLS`
+  - `NEXT_PUBLIC_MONGODB_URI`
+  - `MONGO_URI`
+  - `MONGO_URL`
 - `MONGODB_DB` (optional, defaults to `plugin_data_dashboard`)
 - `PORT` (optional, defaults to `4080`)
 - `ANALYTICS_INGEST_TOKEN` (optional but recommended)
@@ -32,6 +37,22 @@ npm run dev
 ```
 
 Open: `http://localhost:4080`
+
+## Vercel Deployment
+
+This repo is Vercel-serverless ready via:
+- `api/index.js` (serverless handler)
+- `vercel.json` (routes all requests through the handler)
+
+Set these env vars in Vercel Project Settings:
+- `MONGODB_URI` (or one of the fallback URI names listed above)
+- `MONGODB_DB` (optional)
+- `ANALYTICS_INGEST_TOKEN` (recommended)
+- Optional auth gate:
+  - `DASHBOARD_BASIC_AUTH_USER`
+  - `DASHBOARD_BASIC_AUTH_PASS`
+
+If you use your existing env naming from `wayweb-dev`, `NEXT_PUBLIC_MONGODB_URI_TOOLS` works directly.
 
 ## 3) Plugin Ingest Endpoint
 

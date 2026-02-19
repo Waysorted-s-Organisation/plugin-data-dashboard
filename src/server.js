@@ -20,6 +20,8 @@ const PORT = Number(process.env.PORT || 4080);
 const INGEST_TOKEN = (process.env.ANALYTICS_INGEST_TOKEN || "").trim();
 const READ_USER = (process.env.DASHBOARD_BASIC_AUTH_USER || "").trim();
 const READ_PASS = (process.env.DASHBOARD_BASIC_AUTH_PASS || "").trim();
+let initializationPromise = null;
+let isInitialized = false;
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
@@ -170,8 +172,41 @@ function ingestAuthGate(req, res, next) {
   return next();
 }
 
+export async function initializeServer() {
+  if (isInitialized) return;
+  if (!initializationPromise) {
+    initializationPromise = ensureIndexes()
+      .then(() => {
+        isInitialized = true;
+      })
+      .catch((error) => {
+        initializationPromise = null;
+        throw error;
+      });
+  }
+
+  await initializationPromise;
+}
+
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "plugin-data-dashboard" });
+  res.json({
+    ok: true,
+    service: "plugin-data-dashboard",
+    initialized: isInitialized,
+  });
+});
+
+app.use("/api/plugin-analytics", async (_req, res, next) => {
+  try {
+    await initializeServer();
+    next();
+  } catch (error) {
+    console.error("Database initialization failed:", error);
+    res.status(500).json({
+      error: "Database initialization failed",
+      detail: safeString(error && error.message, 320),
+    });
+  }
 });
 
 app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
@@ -586,7 +621,7 @@ app.get("*", (_req, res) => {
 
 async function startServer() {
   try {
-    await ensureIndexes();
+    await initializeServer();
     app.listen(PORT, () => {
       console.log(`plugin-data-dashboard listening on http://localhost:${PORT}`);
     });
@@ -596,4 +631,11 @@ async function startServer() {
   }
 }
 
-startServer();
+export default app;
+
+const isDirectRun =
+  Boolean(process.argv[1]) && path.resolve(process.argv[1]) === __filename;
+
+if (isDirectRun) {
+  startServer();
+}
