@@ -22,6 +22,9 @@ const state = {
 
 let toolChart = null;
 let dailyChart = null;
+let loadDebounceTimer = null;
+let activeLoadController = null;
+let currentLoadToken = 0;
 
 function setStatus(text, isError = false) {
   statusLine.textContent = text;
@@ -74,8 +77,8 @@ function getQueryParams() {
   return params;
 }
 
-async function fetchJson(path) {
-  const response = await fetch(path);
+async function fetchJson(path, options = {}) {
+  const response = await fetch(path, options);
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`${response.status} ${response.statusText} - ${text}`);
@@ -176,78 +179,87 @@ function renderRecentEvents(events) {
 
 function renderToolChart(tools) {
   const ctx = document.getElementById("toolChart");
-  if (toolChart) {
-    toolChart.destroy();
-  }
-
   const labels = (tools || []).slice(0, 10).map((t) => t.tool || "unknown");
   const eventCounts = (tools || []).slice(0, 10).map((t) => t.eventCount || t.events || 0);
 
-  toolChart = new Chart(ctx, {
-    type: "bar",
-    data: {
-      labels,
-      datasets: [
-        {
-          label: "Events",
-          data: eventCounts,
-          backgroundColor: "rgba(24, 83, 209, 0.75)",
-          borderRadius: 6,
+  if (!toolChart) {
+    toolChart = new Chart(ctx, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "Events",
+            data: eventCounts,
+            backgroundColor: "rgba(24, 83, 209, 0.75)",
+            borderRadius: 6,
+          },
+        ],
+      },
+      options: {
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: { display: false },
         },
-      ],
-    },
-    options: {
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
+        scales: {
+          x: { ticks: { maxRotation: 20, minRotation: 20 } },
+        },
       },
-      scales: {
-        x: { ticks: { maxRotation: 20, minRotation: 20 } },
-      },
-    },
-  });
+    });
+    return;
+  }
+
+  toolChart.data.labels = labels;
+  toolChart.data.datasets[0].data = eventCounts;
+  toolChart.update("none");
 }
 
 function renderDailyChart(points) {
   const ctx = document.getElementById("dailyChart");
-  if (dailyChart) {
-    dailyChart.destroy();
-  }
-
   const labels = (points || []).map((p) => p.day);
   const events = (points || []).map((p) => p.events);
   const sessions = (points || []).map((p) => p.sessions);
 
-  dailyChart = new Chart(ctx, {
-    type: "line",
-    data: {
-      labels,
-      datasets: [
-        {
-          label: "Events",
-          data: events,
-          borderColor: "#1853d1",
-          backgroundColor: "rgba(24, 83, 209, 0.16)",
-          tension: 0.25,
-          fill: true,
-        },
-        {
-          label: "Sessions",
-          data: sessions,
-          borderColor: "#0ea476",
-          backgroundColor: "rgba(14, 164, 118, 0.12)",
-          tension: 0.25,
-          fill: false,
-        },
-      ],
-    },
-    options: {
-      maintainAspectRatio: false,
-    },
-  });
+  if (!dailyChart) {
+    dailyChart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "Events",
+            data: events,
+            borderColor: "#1853d1",
+            backgroundColor: "rgba(24, 83, 209, 0.16)",
+            tension: 0.25,
+            fill: true,
+          },
+          {
+            label: "Sessions",
+            data: sessions,
+            borderColor: "#0ea476",
+            backgroundColor: "rgba(14, 164, 118, 0.12)",
+            tension: 0.25,
+            fill: false,
+          },
+        ],
+      },
+      options: {
+        maintainAspectRatio: false,
+        animation: false,
+      },
+    });
+    return;
+  }
+
+  dailyChart.data.labels = labels;
+  dailyChart.data.datasets[0].data = events;
+  dailyChart.data.datasets[1].data = sessions;
+  dailyChart.update("none");
 }
 
-function drawHeatmap(points) {
+function drawHeatmap(heatmap) {
   const ctx = heatmapCanvas.getContext("2d");
   const width = heatmapCanvas.width;
   const height = heatmapCanvas.height;
@@ -256,7 +268,58 @@ function drawHeatmap(points) {
   ctx.fillStyle = "#f7f9ff";
   ctx.fillRect(0, 0, width, height);
 
-  if (!points || !points.length) {
+  const isCompact = Boolean(heatmap && heatmap.compact);
+
+  if (isCompact) {
+    const bins = Array.isArray(heatmap.bins) ? heatmap.bins : [];
+    const grid = heatmap.grid || { x: 96, y: 24 };
+    const maxCount = Number(heatmap.maxCount || 0);
+    const totalPoints = Number(heatmap.totalPoints || 0);
+
+    if (!bins.length || maxCount <= 0) {
+      ctx.fillStyle = "#6d7ea3";
+      ctx.font = "14px IBM Plex Sans";
+      ctx.fillText("No click data for this range.", 20, 28);
+      heatmapCount.textContent = "0 points";
+      return;
+    }
+
+    const cellWidth = width / Math.max(1, Number(grid.x || 96));
+    const cellHeight = height / Math.max(1, Number(grid.y || 24));
+
+    for (const bin of bins) {
+      const intensity = Math.min(1, Number(bin.count || 0) / maxCount);
+      if (intensity <= 0) continue;
+
+      ctx.fillStyle = `rgba(255, 77, 0, ${0.08 + intensity * 0.48})`;
+      ctx.fillRect(
+        Math.floor(Number(bin.x || 0) * cellWidth),
+        Math.floor(Number(bin.y || 0) * cellHeight),
+        Math.ceil(cellWidth),
+        Math.ceil(cellHeight)
+      );
+    }
+
+    ctx.strokeStyle = "rgba(24, 83, 209, 0.12)";
+    for (let x = 0; x <= width; x += 103) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= height; y += 40) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+    }
+
+    heatmapCount.textContent = `${numberLabel(totalPoints)} points`;
+    return;
+  }
+
+  const points = Array.isArray(heatmap && heatmap.points) ? heatmap.points : [];
+  if (!points.length) {
     ctx.fillStyle = "#6d7ea3";
     ctx.font = "14px IBM Plex Sans";
     ctx.fillText("No click data for this range.", 20, 28);
@@ -264,7 +327,7 @@ function drawHeatmap(points) {
     return;
   }
 
-  const maxPoints = 2800;
+  const maxPoints = 1200;
   const sampled = points.slice(0, maxPoints);
 
   sampled.forEach((point) => {
@@ -326,34 +389,57 @@ function updateToolFilterOptions(tools) {
 }
 
 async function loadDashboard() {
+  if (activeLoadController) {
+    activeLoadController.abort();
+  }
+  activeLoadController = new AbortController();
+  const loadToken = ++currentLoadToken;
+
   const params = getQueryParams();
+  params.set("heatmapCompact", "1");
+  params.set("heatmapLimit", "12000");
+  params.set("heatmapGridX", "96");
+  params.set("heatmapGridY", "24");
+  params.set("sessionsLimit", "60");
+  params.set("eventsLimit", "100");
   const query = params.toString();
   setStatus("Loading dashboard data…");
+  const startedAt = performance.now();
 
   try {
-    const [summary, toolUsage, heatmap, sessions, recentEvents] = await Promise.all([
-      fetchJson(`/api/plugin-analytics/summary?${query}`),
-      fetchJson(`/api/plugin-analytics/tool-usage?${query}`),
-      fetchJson(`/api/plugin-analytics/heatmap?${query}&limit=5000`),
-      fetchJson(`/api/plugin-analytics/sessions?${query}&limit=80`),
-      fetchJson(`/api/plugin-analytics/recent-events?${query}&limit=120`),
-    ]);
+    const dashboard = await fetchJson(`/api/plugin-analytics/dashboard?${query}`, {
+      signal: activeLoadController.signal,
+    });
+
+    if (loadToken !== currentLoadToken) {
+      return;
+    }
+
+    const summary = dashboard.summary || {};
+    const toolUsage = dashboard.toolUsage || {};
+    const sessions = dashboard.sessions || {};
+    const recentEvents = dashboard.recentEvents || {};
 
     renderKpis(summary.kpis || {});
     renderTopActions(summary.topActions || []);
     renderToolChart(toolUsage.tools || []);
     renderDailyChart(summary.eventsByDay || []);
-    drawHeatmap(heatmap.points || []);
+    drawHeatmap(dashboard.heatmap || {});
     renderSessions(sessions.sessions || []);
     renderRecentEvents(recentEvents.events || []);
     updateToolFilterOptions(toolUsage.tools || []);
 
+    const elapsedMs = Math.round(performance.now() - startedAt);
+
     setStatus(
       `Updated ${new Date().toLocaleTimeString()} • ${numberLabel(
         summary.kpis && summary.kpis.totalEvents
-      )} events in range.`
+      )} events in range • ${elapsedMs}ms`
     );
   } catch (error) {
+    if (error && error.name === "AbortError") {
+      return;
+    }
     console.error(error);
     setStatus(`Failed to load dashboard: ${error.message}`, true);
   }
@@ -376,35 +462,45 @@ function applyPreset(preset) {
   toDateEl.value = toLocalInputValue(state.to);
 }
 
+function scheduleLoad(delayMs = 180) {
+  if (loadDebounceTimer) {
+    clearTimeout(loadDebounceTimer);
+  }
+  loadDebounceTimer = setTimeout(() => {
+    loadDebounceTimer = null;
+    loadDashboard();
+  }, delayMs);
+}
+
 function bindControls() {
   rangePresetEl.addEventListener("change", () => {
     const preset = rangePresetEl.value;
     if (preset !== "custom") {
       applyPreset(preset);
-      loadDashboard();
+      scheduleLoad(80);
     }
   });
 
   fromDateEl.addEventListener("change", () => {
     state.from = parseLocalInputValue(fromDateEl.value, state.from);
     rangePresetEl.value = "custom";
-    loadDashboard();
+    scheduleLoad(80);
   });
 
   toDateEl.addEventListener("change", () => {
     state.to = parseLocalInputValue(toDateEl.value, state.to);
     rangePresetEl.value = "custom";
-    loadDashboard();
+    scheduleLoad(80);
   });
 
   toolFilterEl.addEventListener("change", () => {
     state.tool = toolFilterEl.value;
-    loadDashboard();
+    scheduleLoad(80);
   });
 
   authFilterEl.addEventListener("change", () => {
     state.auth = authFilterEl.value;
-    loadDashboard();
+    scheduleLoad(80);
   });
 
   refreshBtn.addEventListener("click", () => loadDashboard());

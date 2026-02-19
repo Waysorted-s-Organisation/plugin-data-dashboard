@@ -97,12 +97,21 @@ x-plugin-ingest-token: <token>
 - `GET /api/plugin-analytics/heatmap`
 - `GET /api/plugin-analytics/sessions`
 - `GET /api/plugin-analytics/recent-events`
+- `GET /api/plugin-analytics/dashboard` (single optimized payload for UI)
 
 Common query params:
 - `from=<ISO date>`
 - `to=<ISO date>`
 - `tool=<tool id | all>`
 - `auth=<authenticated | anonymous | all>`
+
+Additional dashboard endpoint query params:
+- `heatmapCompact=1` (default true)
+- `heatmapLimit=<n>`
+- `heatmapGridX=<n>`
+- `heatmapGridY=<n>`
+- `sessionsLimit=<n>`
+- `eventsLimit=<n>`
 
 ## Notes
 
