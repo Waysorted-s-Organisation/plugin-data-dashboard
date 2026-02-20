@@ -26,6 +26,8 @@ const READ_USER = (process.env.DASHBOARD_BASIC_AUTH_USER || "").trim();
 const READ_PASS = (process.env.DASHBOARD_BASIC_AUTH_PASS || "").trim();
 let initializationPromise = null;
 let isInitialized = false;
+const PASSIVE_EVENT_TYPES = ["session_heartbeat", "plugin_message"];
+const MAX_EVENT_TYPE_BREAKDOWN = 40;
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
@@ -339,6 +341,16 @@ async function fetchSummaryData(eventsCollection, match) {
             _id: "$tool",
             events: { $sum: 1 },
             sessions: { $addToSet: "$sessionId" },
+            activeEvents: {
+              $sum: {
+                $cond: [{ $in: ["$eventType", PASSIVE_EVENT_TYPES] }, 0, 1],
+              },
+            },
+            passiveEvents: {
+              $sum: {
+                $cond: [{ $in: ["$eventType", PASSIVE_EVENT_TYPES] }, 1, 0],
+              },
+            },
             timeSpentMs: {
               $sum: {
                 $cond: [
@@ -363,10 +375,12 @@ async function fetchSummaryData(eventsCollection, match) {
             tool: "$_id",
             events: 1,
             sessionCount: { $size: "$sessions" },
+            activeEvents: 1,
+            passiveEvents: 1,
             timeSpentMs: { $round: ["$timeSpentMs", 2] },
           },
         },
-        { $sort: { events: -1 } },
+        { $sort: { activeEvents: -1, events: -1 } },
         { $limit: 12 },
       ])
       .toArray(),
@@ -453,6 +467,21 @@ async function fetchToolUsageData(eventsCollection, match) {
         $group: {
           _id: "$tool",
           eventCount: { $sum: 1 },
+          activeEventCount: {
+            $sum: {
+              $cond: [{ $in: ["$eventType", PASSIVE_EVENT_TYPES] }, 0, 1],
+            },
+          },
+          passiveEventCount: {
+            $sum: {
+              $cond: [{ $in: ["$eventType", PASSIVE_EVENT_TYPES] }, 1, 0],
+            },
+          },
+          clickCount: {
+            $sum: {
+              $cond: [{ $eq: ["$eventType", "ui_click"] }, 1, 0],
+            },
+          },
           sessionIds: { $addToSet: "$sessionId" },
           users: { $addToSet: "$user.userId" },
           timeSpentMs: {
@@ -478,6 +507,9 @@ async function fetchToolUsageData(eventsCollection, match) {
           _id: 0,
           tool: "$_id",
           eventCount: 1,
+          activeEventCount: 1,
+          passiveEventCount: 1,
+          clickCount: 1,
           sessionCount: { $size: "$sessionIds" },
           userCount: {
             $size: {
@@ -487,7 +519,7 @@ async function fetchToolUsageData(eventsCollection, match) {
           timeSpentMs: { $round: ["$timeSpentMs", 2] },
         },
       },
-      { $sort: { eventCount: -1 } },
+      { $sort: { activeEventCount: -1, eventCount: -1 } },
     ])
     .toArray();
 }
@@ -564,6 +596,16 @@ async function fetchSessionsData(eventsCollection, match, limit = 60) {
           startedAt: { $first: "$eventAt" },
           endedAt: { $last: "$eventAt" },
           eventCount: { $sum: 1 },
+          activeEventCount: {
+            $sum: {
+              $cond: [{ $in: ["$eventType", PASSIVE_EVENT_TYPES] }, 0, 1],
+            },
+          },
+          passiveEventCount: {
+            $sum: {
+              $cond: [{ $in: ["$eventType", PASSIVE_EVENT_TYPES] }, 1, 0],
+            },
+          },
           user: { $last: "$user" },
           tools: { $addToSet: "$tool" },
           lastSource: { $last: "$source" },
@@ -577,6 +619,8 @@ async function fetchSessionsData(eventsCollection, match, limit = 60) {
           endedAt: 1,
           durationMs: { $subtract: ["$endedAt", "$startedAt"] },
           eventCount: 1,
+          activeEventCount: 1,
+          passiveEventCount: 1,
           user: 1,
           tools: 1,
           lastSource: 1,
@@ -603,6 +647,31 @@ async function fetchRecentEventsData(eventsCollection, match, limit = 120) {
     })
     .sort({ eventAt: -1 })
     .limit(limit)
+    .toArray();
+}
+
+async function fetchEventTypeBreakdown(eventsCollection, match, limit = MAX_EVENT_TYPE_BREAKDOWN) {
+  return eventsCollection
+    .aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: "$eventType",
+          count: { $sum: 1 },
+          sessionIds: { $addToSet: "$sessionId" },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          eventType: "$_id",
+          count: 1,
+          sessionCount: { $size: "$sessionIds" },
+        },
+      },
+      { $sort: { count: -1 } },
+      { $limit: limit },
+    ])
     .toArray();
 }
 
@@ -756,7 +825,7 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
     const sessionsLimit = parseLimit(req.query.sessionsLimit, 60, 300);
     const recentEventsLimit = parseLimit(req.query.eventsLimit, 100, 1000);
 
-    const [summary, tools, heatmap, sessions, events] = await Promise.all([
+    const [summary, tools, heatmap, sessions, events, eventTypeBreakdown] = await Promise.all([
       fetchSummaryData(eventsCollection, match),
       fetchToolUsageData(eventsCollection, match),
       fetchHeatmapData(eventsCollection, match, {
@@ -768,6 +837,7 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
       }),
       fetchSessionsData(eventsCollection, match, sessionsLimit),
       fetchRecentEventsData(eventsCollection, match, recentEventsLimit),
+      fetchEventTypeBreakdown(eventsCollection, match),
     ]);
 
     return res.json({
@@ -775,6 +845,7 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
       to,
       summary,
       toolUsage: { tools },
+      eventTypeBreakdown,
       heatmap,
       sessions: { sessions },
       recentEvents: { events },

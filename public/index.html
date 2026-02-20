@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Plugin Analytics Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/styles.css" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   </head>
@@ -13,7 +19,7 @@
         <p class="eyebrow">Internal Analytics</p>
         <h1>Plugin Data Dashboard</h1>
         <p class="subtitle">
-          Auth + anonymous user behavior, tool usage, time spent, heatmap, and session KPIs.
+          Understand user intent, engagement quality, and tool journeys without raw telemetry noise.
         </p>
       </div>
       <button id="refreshBtn" class="primary-btn">Refresh</button>
@@ -55,19 +61,28 @@
           <option value="anonymous">Anonymous only</option>
         </select>
       </label>
+
+      <label class="checkbox-label">
+        Focus mode
+        <span class="checkbox-row">
+          <input id="showSystemEvents" type="checkbox" />
+          <span>Include system events</span>
+        </span>
+      </label>
     </section>
 
     <section id="kpiGrid" class="kpi-grid"></section>
+    <section id="insightsGrid" class="insights-grid"></section>
 
     <section class="card-grid two-up">
       <article class="card">
-        <h2>Top Tools (Events)</h2>
+        <h2>Top Tools (Meaningful Activity)</h2>
         <div class="chart-wrap">
           <canvas id="toolChart"></canvas>
         </div>
       </article>
       <article class="card">
-        <h2>Events & Sessions by Day</h2>
+        <h2>Activity Trend by Day</h2>
         <div class="chart-wrap">
           <canvas id="dailyChart"></canvas>
         </div>
@@ -85,13 +100,16 @@
         </div>
       </article>
       <article class="card">
-        <h2>Top Actions</h2>
+        <h2>Action Intelligence</h2>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Action</th>
+                <th>Event</th>
+                <th>Meaning</th>
+                <th>Category</th>
                 <th>Count</th>
+                <th>Share</th>
               </tr>
             </thead>
             <tbody id="actionsBody"></tbody>
@@ -101,7 +119,7 @@
     </section>
 
     <section class="card">
-      <h2>Recent Sessions</h2>
+      <h2>Session Quality</h2>
       <div class="table-wrap">
         <table>
           <thead>
@@ -109,8 +127,8 @@
               <th>Session</th>
               <th>User</th>
               <th>Duration</th>
-              <th>Events</th>
-              <th>Tools</th>
+              <th>Active Actions</th>
+              <th>Tools Used</th>
               <th>Last Seen</th>
             </tr>
           </thead>
@@ -120,15 +138,15 @@
     </section>
 
     <section class="card">
-      <h2>Recent Events</h2>
+      <h2>Recent Event Timeline</h2>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
               <th>Time</th>
-              <th>Event</th>
+              <th>What Happened</th>
               <th>Tool</th>
-              <th>Source</th>
+              <th>Value Signal</th>
               <th>User</th>
               <th>Session</th>
             </tr>
