@@ -81,27 +81,236 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function normalizeUser(user) {
+function stableHashId(input) {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash +=
+      (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return Math.abs(hash >>> 0).toString(36);
+}
+
+const TOOL_ALIASES = {
+  dashboard: "dashboard",
+  "collapsed-dashboard": "collapsed-dashboard",
+  collapsed_dashboard: "collapsed-dashboard",
+  palettable: "palettable",
+  palette: "palettable",
+  "palette-tool": "palettable",
+  "frame-gallery": "frame-gallery",
+  frame_gallery: "frame-gallery",
+  "import-tool": "import-tool",
+  import_tool: "import-tool",
+  "unit-converter": "unit-converter",
+  unit_converter: "unit-converter",
+  profile: "profile",
+  "wayfall-game": "wayfall-game",
+  game: "wayfall-game",
+  "liquid-glass": "liquid-glass",
+  liquid_glass: "liquid-glass",
+  unknown: "unknown",
+};
+
+const ACTION_TO_TOOL = {
+  "toggle-palette": "palettable",
+  "export-palette": "palettable",
+  "export-color-schemes": "palettable",
+  "export-selected-options": "palettable",
+  "start-eyedropper": "palettable",
+  "color-copied": "palettable",
+  "copy-link": "palettable",
+  notify: "palettable",
+  "toggle-frame-gallery": "frame-gallery",
+  "toggle-manual-selection": "frame-gallery",
+  "clear-manual-selection": "frame-gallery",
+  "get-manual-selection-state": "frame-gallery",
+  "get-all-frames": "frame-gallery",
+  "export-frames-with-dpi": "frame-gallery",
+  "export-zip-with-password": "frame-gallery",
+  "toggle-import-tool": "import-tool",
+  "import-svg-to-figma": "import-tool",
+  "check-font-availability": "import-tool",
+  "get-font": "import-tool",
+  "toggle-unit-converter": "unit-converter",
+  "apply-preset": "unit-converter",
+  "create-frame": "unit-converter",
+  "save-preset": "unit-converter",
+  "delete-preset": "unit-converter",
+  "load-presets": "unit-converter",
+  "load-liked-presets": "unit-converter",
+  "save-liked-presets": "unit-converter",
+  "convert-units": "unit-converter",
+  "export-frame": "unit-converter",
+  "toggle-profile": "profile",
+  "avatar-selected": "profile",
+  "store-avatar": "profile",
+  "oauth-token": "profile",
+  "store-token": "profile",
+  "clear-token": "profile",
+  "open-auth-url": "profile",
+  "copy-to-clipboard": "profile",
+  "get-token": "profile",
+  "get-session": "profile",
+  "store-session": "profile",
+  "clear-session": "profile",
+  "toggle-game": "wayfall-game",
+  "toggle-liquid-glass": "liquid-glass",
+  "lg-refresh": "liquid-glass",
+  "toggle-collapse": "collapsed-dashboard",
+  "tool-collapsed": "collapsed-dashboard",
+  "palette-to-collapsed": "collapsed-dashboard",
+  "resize-expanded": "dashboard",
+  "resize-window": "dashboard",
+  "get-ui-state": "dashboard",
+};
+
+const DASHBOARD_DEFAULT_EVENTS = new Set([
+  "plugin_session_started",
+  "plugin_session_ended",
+  "session_heartbeat",
+  "ui_session_started",
+  "ui_heartbeat",
+  "ui_resize",
+  "ui_visibility_change",
+  "ui_scroll",
+  "ui_before_unload",
+  "ui_state_snapshot",
+  "ui_user_authenticated",
+  "ui_user_unauthenticated",
+  "user_context_changed",
+  "analytics_transport_updated",
+  "plugin_message",
+]);
+
+function normalizeToolId(toolId) {
+  const key = safeString(toolId, 120);
+  if (!key) return null;
+  const normalized = key.trim().toLowerCase();
+  return TOOL_ALIASES[normalized] || normalized;
+}
+
+function inferToolFromAction(action) {
+  const key = safeString(action, 120);
+  if (!key) return null;
+  const normalized = key.toLowerCase();
+  if (ACTION_TO_TOOL[normalized]) return ACTION_TO_TOOL[normalized];
+
+  if (normalized.includes("palette") || normalized.includes("color")) {
+    return "palettable";
+  }
+  if (normalized.includes("frame") || normalized.includes("zip")) {
+    return "frame-gallery";
+  }
+  if (normalized.includes("import") || normalized.includes("font")) {
+    return "import-tool";
+  }
+  if (normalized.includes("unit") || normalized.includes("preset")) {
+    return "unit-converter";
+  }
+  if (
+    normalized.includes("auth") ||
+    normalized.includes("token") ||
+    normalized.includes("session") ||
+    normalized.includes("profile") ||
+    normalized.includes("avatar")
+  ) {
+    return "profile";
+  }
+  if (normalized.includes("game")) return "wayfall-game";
+  if (normalized.includes("liquid") || normalized.includes("lg-")) {
+    return "liquid-glass";
+  }
+  return null;
+}
+
+function inferToolForEvent(eventType, payload, rawTool) {
+  const payloadObj = payload && typeof payload === "object" ? payload : {};
+  const payloadElement =
+    payloadObj.element && typeof payloadObj.element === "object"
+      ? payloadObj.element
+      : {};
+
+  const candidates = [
+    rawTool,
+    payloadObj.uiTool,
+    payloadObj.tool,
+    payloadElement.toolId,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeToolId(candidate);
+    if (normalized && normalized !== "unknown") return normalized;
+  }
+
+  const inferredFromAction = inferToolFromAction(
+    payloadObj.action || payloadObj.messageType || payloadObj.type
+  );
+  if (inferredFromAction) return inferredFromAction;
+
+  const normalizedEventType = String(eventType || "").trim().toLowerCase();
+  if (DASHBOARD_DEFAULT_EVENTS.has(normalizedEventType)) {
+    return "dashboard";
+  }
+
+  return normalizeToolId(rawTool) || "unknown";
+}
+
+function anonymousIdFromSeed(seed) {
+  const value = safeString(seed, 240);
+  if (!value) return null;
+  return `device_${stableHashId(value)}`;
+}
+
+function normalizeUser(user, fallbackAnonymousSeed = null) {
   if (!user || typeof user !== "object") {
+    const fallbackAnonymousId = anonymousIdFromSeed(fallbackAnonymousSeed);
     return {
       isAuthenticated: false,
       userId: null,
+      anonymousId: fallbackAnonymousId,
       name: null,
       email: null,
+      identitySource: fallbackAnonymousId ? "device-fallback" : null,
     };
   }
 
-  const userId =
+  const inferredUserId =
     safeString(user.userId) ||
     safeString(user.id) ||
     safeString(user._id) ||
     safeString(user.email);
+  const explicitIsAuthenticated =
+    typeof user.isAuthenticated === "boolean" ? user.isAuthenticated : null;
+  const isAuthenticated =
+    explicitIsAuthenticated !== null
+      ? explicitIsAuthenticated
+      : Boolean(inferredUserId || user.email);
+  const fallbackAnonymousId = anonymousIdFromSeed(fallbackAnonymousSeed);
+  const anonymousIdInput =
+    safeString(user.anonymousId) ||
+    safeString(user.anonId) ||
+    (isAuthenticated ? null : safeString(user.userId || user.id)) ||
+    (isAuthenticated ? null : fallbackAnonymousId);
+  const userId = isAuthenticated ? inferredUserId : null;
+  const anonymousId = isAuthenticated ? null : anonymousIdInput;
+  const identitySource =
+    safeString(user.identitySource, 80) ||
+    (isAuthenticated
+      ? "authenticated"
+      : safeString(user.anonymousId) || safeString(user.anonId)
+      ? "anonymous"
+      : fallbackAnonymousId
+      ? "device-fallback"
+      : null);
 
   return {
-    isAuthenticated: Boolean(user.isAuthenticated || userId || user.email),
+    isAuthenticated,
     userId,
-    name: safeString(user.name, 120),
-    email: safeString(user.email, 160),
+    anonymousId,
+    name: isAuthenticated ? safeString(user.name, 120) : null,
+    email: isAuthenticated ? safeString(user.email, 160) : null,
+    identitySource,
   };
 }
 
@@ -292,6 +501,7 @@ async function fetchSummaryData(eventsCollection, match) {
     totalEvents,
     uniqueSessionsRaw,
     uniqueUsersRaw,
+    uniqueAnonymousUsersRaw,
     anonymousEvents,
     sessionDurationAgg,
     topTools,
@@ -304,6 +514,11 @@ async function fetchSummaryData(eventsCollection, match) {
       ...match,
       "user.isAuthenticated": true,
       "user.userId": { $ne: null },
+    }),
+    eventsCollection.distinct("user.anonymousId", {
+      ...match,
+      "user.isAuthenticated": false,
+      "user.anonymousId": { $ne: null },
     }),
     eventsCollection.countDocuments({
       ...match,
@@ -390,7 +605,17 @@ async function fetchSummaryData(eventsCollection, match) {
         {
           $project: {
             action: {
-              $ifNull: ["$payload.action", "$eventType"],
+              $ifNull: [
+                "$payload.action",
+                {
+                  $ifNull: [
+                    "$payload.messageType",
+                    {
+                      $ifNull: ["$payload.type", "$eventType"],
+                    },
+                  ],
+                },
+              ],
             },
           },
         },
@@ -449,6 +674,7 @@ async function fetchSummaryData(eventsCollection, match) {
       totalEvents,
       totalSessions: uniqueSessionsRaw.length,
       authenticatedUsers: uniqueUsersRaw.length,
+      anonymousUsers: uniqueAnonymousUsersRaw.length,
       anonymousEvents,
       avgSessionDurationMs: Math.round(toNumber(durationInfo.avgSessionDurationMs, 0)),
       maxSessionDurationMs: Math.round(toNumber(durationInfo.maxSessionDurationMs, 0)),
@@ -483,7 +709,8 @@ async function fetchToolUsageData(eventsCollection, match) {
             },
           },
           sessionIds: { $addToSet: "$sessionId" },
-          users: { $addToSet: "$user.userId" },
+          authUsers: { $addToSet: "$user.userId" },
+          anonymousUsers: { $addToSet: "$user.anonymousId" },
           timeSpentMs: {
             $sum: {
               $cond: [
@@ -511,12 +738,22 @@ async function fetchToolUsageData(eventsCollection, match) {
           passiveEventCount: 1,
           clickCount: 1,
           sessionCount: { $size: "$sessionIds" },
-          userCount: {
+          authenticatedUserCount: {
             $size: {
-              $setDifference: ["$users", [null]],
+              $setDifference: ["$authUsers", [null]],
+            },
+          },
+          anonymousUserCount: {
+            $size: {
+              $setDifference: ["$anonymousUsers", [null]],
             },
           },
           timeSpentMs: { $round: ["$timeSpentMs", 2] },
+        },
+      },
+      {
+        $addFields: {
+          userCount: { $add: ["$authenticatedUserCount", "$anonymousUserCount"] },
         },
       },
       { $sort: { activeEventCount: -1, eventCount: -1 } },
@@ -692,26 +929,36 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
       sentAt: toDate(body.sentAt, now),
       runtime: body.runtime && typeof body.runtime === "object" ? body.runtime : {},
       plugin: body.plugin && typeof body.plugin === "object" ? body.plugin : {},
-      user: normalizeUser(body.user),
+      user: normalizeUser(body.user, safeString(body.deviceId, 120) || safeString(body.sessionId, 120)),
     };
 
     const docs = inputEvents.slice(0, 1000).map((event) => {
       const eventType = safeString(event && (event.eventType || event.type), 120) || "unknown_event";
       const eventAt = toDate(event && (event.eventAt || event.timestamp), envelope.sentAt || now);
-      const user = normalizeUser((event && event.user) || envelope.user);
+      const eventDeviceId =
+        safeString(event && event.deviceId, 120) || envelope.deviceId || "unknown-device";
+      const eventSessionId =
+        safeString(event && event.sessionId, 120) || envelope.sessionId || "unknown-session";
+      const payload = sanitizePayload(event && event.payload);
+      const user = normalizeUser(
+        (event && event.user) || envelope.user,
+        eventDeviceId || eventSessionId
+      );
+      const rawTool =
+        safeString(event && event.tool, 120) ||
+        safeString(payload && payload.uiTool, 120) ||
+        null;
+      const tool = inferToolForEvent(eventType, payload, rawTool);
 
       return {
-        sessionId: safeString(event && event.sessionId, 120) || envelope.sessionId || "unknown-session",
-        deviceId: safeString(event && event.deviceId, 120) || envelope.deviceId || "unknown-device",
+        sessionId: eventSessionId,
+        deviceId: eventDeviceId,
         eventType,
         eventAt,
         receivedAt: now,
         source: safeString(event && event.source, 80) || envelope.source,
-        tool:
-          safeString(event && event.tool, 120) ||
-          safeString(event && event.payload && event.payload.uiTool, 120) ||
-          "unknown",
-        payload: sanitizePayload(event && event.payload),
+        tool,
+        payload,
         user,
         runtime: envelope.runtime,
         plugin: envelope.plugin,

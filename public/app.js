@@ -15,17 +15,35 @@ const authFilterEl = document.getElementById("authFilter")
 const showSystemEventsEl = document.getElementById("showSystemEvents")
 const refreshBtn = document.getElementById("refreshBtn")
 
-const PASSIVE_EVENT_TYPES = new Set(["session_heartbeat", "plugin_message"])
+const PASSIVE_EVENT_TYPES = new Set([
+  "session_heartbeat",
+  "plugin_message",
+  "ui_heartbeat",
+  "ui_state_snapshot",
+  "ui_visibility_change",
+  "analytics_transport_updated",
+])
+
 const TOOL_LABELS = {
   dashboard: "Plugin Dashboard",
+  "collapsed-dashboard": "Collapsed Dashboard",
+  collapsed_dashboard: "Collapsed Dashboard",
   palettable: "Palette Tool",
+  palette: "Palette Tool",
+  "frame-gallery": "Frame Gallery",
   frame_gallery: "Frame Gallery",
+  "import-tool": "Import Tool",
   import_tool: "Import Tool",
+  "unit-converter": "Unit Converter",
   unit_converter: "Unit Converter",
+  "wayfall-game": "Wayfall Mini Game",
+  game: "Wayfall Mini Game",
+  "liquid-glass": "Liquid Glass",
   liquid_glass: "Liquid Glass",
   profile: "User Profile",
-  game: "Mini Game",
-  unknown: "Unmapped Tool",
+  unknown: "Unattributed / Legacy",
+  unattributed: "Unattributed / Legacy",
+  system: "System",
 }
 
 const EVENT_METADATA = {
@@ -49,9 +67,51 @@ const EVENT_METADATA = {
   },
   plugin_message: {
     label: "Plugin Message",
-    description: "Internal UI to plugin bridge communication.",
+    description: "Internal UI-to-main bridge communication.",
     category: "System",
     signal: "low",
+  },
+  tool_opened: {
+    label: "Tool Opened",
+    description: "A tool panel was opened by the user.",
+    category: "Navigation",
+    signal: "high",
+  },
+  tool_closed: {
+    label: "Tool Closed",
+    description: "A tool panel was closed by the user.",
+    category: "Navigation",
+    signal: "medium",
+  },
+  tool_context_changed: {
+    label: "Tool Context Changed",
+    description: "User moved from one tool context to another.",
+    category: "Navigation",
+    signal: "medium",
+  },
+  tool_action: {
+    label: "Tool Action",
+    description: "Specific command/action taken inside a tool.",
+    category: "Interaction",
+    signal: "high",
+  },
+  tool_time_spent: {
+    label: "Tool Time Spent",
+    description: "Measured time spent in a specific tool.",
+    category: "Engagement",
+    signal: "high",
+  },
+  user_context_changed: {
+    label: "User Context Updated",
+    description: "User identity context changed in analytics runtime.",
+    category: "Identity",
+    signal: "medium",
+  },
+  ui_session_started: {
+    label: "UI Session Started",
+    description: "Dashboard UI runtime session initialized.",
+    category: "Lifecycle",
+    signal: "medium",
   },
   ui_click: {
     label: "UI Click",
@@ -59,41 +119,418 @@ const EVENT_METADATA = {
     category: "Interaction",
     signal: "high",
   },
-  tool_opened: {
-    label: "Tool Opened",
-    description: "A tool panel was opened by user.",
-    category: "Navigation",
-    signal: "high",
-  },
-  tool_closed: {
-    label: "Tool Closed",
-    description: "A tool panel was closed by user.",
-    category: "Navigation",
+  ui_scroll: {
+    label: "UI Scroll",
+    description: "User scrolled in plugin UI.",
+    category: "Interaction",
     signal: "medium",
   },
-  tool_context_changed: {
-    label: "Tool Context Changed",
-    description: "User navigated between plugin tool contexts.",
-    category: "Navigation",
-    signal: "medium",
+  ui_resize: {
+    label: "UI Resize",
+    description: "Plugin UI viewport size changed.",
+    category: "System",
+    signal: "low",
   },
-  tool_time_spent: {
-    label: "Tool Time Spent",
-    description: "Measured active time spent inside a tool.",
-    category: "Engagement",
+  ui_visibility_change: {
+    label: "UI Visibility Changed",
+    description: "Browser/tab visibility status changed.",
+    category: "System",
+    signal: "low",
+  },
+  ui_state_snapshot: {
+    label: "UI State Snapshot",
+    description: "Current open/closed tool panel snapshot.",
+    category: "System",
+    signal: "low",
+  },
+  ui_heartbeat: {
+    label: "UI Heartbeat",
+    description: "Periodic UI health/heartbeat event.",
+    category: "System",
+    signal: "low",
+  },
+  ui_before_unload: {
+    label: "UI Before Unload",
+    description: "UI session is about to unload/close.",
+    category: "Lifecycle",
+    signal: "low",
+  },
+  ui_user_authenticated: {
+    label: "UI User Authenticated",
+    description: "User signed in and auth context became available.",
+    category: "Identity",
     signal: "high",
+  },
+  ui_user_unauthenticated: {
+    label: "UI User Unauthenticated",
+    description: "User signed out or auth state cleared.",
+    category: "Identity",
+    signal: "medium",
   },
   analytics_transport_updated: {
     label: "Analytics Transport Updated",
-    description: "Analytics endpoint or token setting was updated.",
+    description: "Analytics endpoint or ingest token was changed.",
     category: "System",
     signal: "low",
   },
   unknown_event: {
     label: "Unknown Event",
-    description: "Event type not yet mapped in dashboard catalog.",
+    description: "Event not yet explicitly cataloged.",
     category: "Unmapped",
     signal: "low",
+  },
+}
+
+const ACTION_METADATA = {
+  "toggle-profile": {
+    label: "Toggle Profile",
+    description: "Open/close profile panel.",
+    category: "Navigation",
+    signal: "high",
+  },
+  "toggle-game": {
+    label: "Toggle Game",
+    description: "Open/close Wayfall game panel.",
+    category: "Navigation",
+    signal: "medium",
+  },
+  "toggle-palette": {
+    label: "Toggle Palette Tool",
+    description: "Open/close palette tool panel.",
+    category: "Navigation",
+    signal: "high",
+  },
+  "toggle-frame-gallery": {
+    label: "Toggle Frame Gallery",
+    description: "Open/close frame gallery panel.",
+    category: "Navigation",
+    signal: "high",
+  },
+  "toggle-import-tool": {
+    label: "Toggle Import Tool",
+    description: "Open/close import tool panel.",
+    category: "Navigation",
+    signal: "high",
+  },
+  "toggle-unit-converter": {
+    label: "Toggle Unit Converter",
+    description: "Open/close unit converter panel.",
+    category: "Navigation",
+    signal: "high",
+  },
+  "toggle-liquid-glass": {
+    label: "Toggle Liquid Glass",
+    description: "Enable/disable liquid glass preview.",
+    category: "Navigation",
+    signal: "medium",
+  },
+  "toggle-collapse": {
+    label: "Toggle Dashboard Collapse",
+    description: "Collapse/expand dashboard shell.",
+    category: "Navigation",
+    signal: "medium",
+  },
+  "resize-expanded": {
+    label: "Resize Expanded UI",
+    description: "Reset plugin UI into expanded state.",
+    category: "Layout",
+    signal: "low",
+  },
+  "tool-collapsed": {
+    label: "Collapse Tool View",
+    description: "Force tool panel into collapsed dashboard state.",
+    category: "Layout",
+    signal: "medium",
+  },
+  "palette-to-collapsed": {
+    label: "Palette To Collapsed",
+    description: "Close palette and switch to collapsed dashboard.",
+    category: "Navigation",
+    signal: "medium",
+  },
+  "resize-window": {
+    label: "Resize Window",
+    description: "Plugin window resized by UI command.",
+    category: "Layout",
+    signal: "low",
+  },
+  "get-ui-state": {
+    label: "Request UI State",
+    description: "UI requested latest state snapshot from main runtime.",
+    category: "System",
+    signal: "low",
+    passive: true,
+  },
+  "get-all-frames": {
+    label: "Fetch Frames",
+    description: "Load current document frames for frame gallery.",
+    category: "Frame Workflow",
+    signal: "high",
+  },
+  "export-frames-with-dpi": {
+    label: "Export Frames (DPI)",
+    description: "Export selected/all frames at requested DPI.",
+    category: "Export",
+    signal: "high",
+  },
+  "export-zip-with-password": {
+    label: "Export ZIP",
+    description: "Start protected ZIP export flow.",
+    category: "Export",
+    signal: "high",
+  },
+  "toggle-manual-selection": {
+    label: "Toggle Manual Selection",
+    description: "Enable/disable manual frame selection mode.",
+    category: "Frame Workflow",
+    signal: "high",
+  },
+  "clear-manual-selection": {
+    label: "Clear Manual Selection",
+    description: "Clear manually selected frame set.",
+    category: "Frame Workflow",
+    signal: "medium",
+  },
+  "get-manual-selection-state": {
+    label: "Get Manual Selection State",
+    description: "Query frame gallery manual selection state.",
+    category: "Frame Workflow",
+    signal: "low",
+  },
+  "convert-units": {
+    label: "Convert Units",
+    description: "Run unit conversion operation.",
+    category: "Unit Conversion",
+    signal: "high",
+  },
+  "create-frame": {
+    label: "Create Frame",
+    description: "Create frame from unit-converter settings.",
+    category: "Unit Conversion",
+    signal: "high",
+  },
+  "apply-preset": {
+    label: "Apply Preset",
+    description: "Apply saved preset to create frame.",
+    category: "Unit Conversion",
+    signal: "high",
+  },
+  "save-preset": {
+    label: "Save Preset",
+    description: "Persist a unit-converter preset.",
+    category: "Unit Conversion",
+    signal: "medium",
+  },
+  "delete-preset": {
+    label: "Delete Preset",
+    description: "Remove a saved unit-converter preset.",
+    category: "Unit Conversion",
+    signal: "medium",
+  },
+  "load-presets": {
+    label: "Load Presets",
+    description: "Retrieve available unit-converter presets.",
+    category: "Unit Conversion",
+    signal: "low",
+  },
+  "ui-loaded": {
+    label: "UI Loaded",
+    description: "Tool UI initialization completed.",
+    category: "System",
+    signal: "low",
+    passive: true,
+  },
+  "load-liked-presets": {
+    label: "Load Liked Presets",
+    description: "Fetch liked/favorite presets.",
+    category: "Unit Conversion",
+    signal: "low",
+  },
+  "save-liked-presets": {
+    label: "Save Liked Presets",
+    description: "Persist liked/favorite preset list.",
+    category: "Unit Conversion",
+    signal: "medium",
+  },
+  "export-frame": {
+    label: "Export Frame",
+    description: "Export current selected frame.",
+    category: "Export",
+    signal: "high",
+  },
+  "check-font-availability": {
+    label: "Check Font Availability",
+    description: "Validate required fonts before import.",
+    category: "Import",
+    signal: "high",
+  },
+  "import-svg-to-figma": {
+    label: "Import SVG",
+    description: "Import SVG content into current document.",
+    category: "Import",
+    signal: "high",
+  },
+  "export-palette": {
+    label: "Export Palette",
+    description: "Export generated palette variation.",
+    category: "Palette",
+    signal: "high",
+  },
+  "export-color-schemes": {
+    label: "Export Color Schemes",
+    description: "Export selected color scheme variation.",
+    category: "Palette",
+    signal: "high",
+  },
+  "export-selected-options": {
+    label: "Export Selected Options",
+    description: "Batch export selected palette options.",
+    category: "Palette",
+    signal: "high",
+  },
+  "start-eyedropper": {
+    label: "Start Eyedropper",
+    description: "Activate eyedropper color pick flow.",
+    category: "Palette",
+    signal: "high",
+  },
+  notify: {
+    label: "Notify",
+    description: "Show user notification from UI.",
+    category: "System",
+    signal: "low",
+    passive: true,
+  },
+  "copy-link": {
+    label: "Copy Link",
+    description: "Copy generated link to clipboard.",
+    category: "Interaction",
+    signal: "medium",
+  },
+  "color-copied": {
+    label: "Copy Color Code",
+    description: "Copy color value from palette workflow.",
+    category: "Palette",
+    signal: "high",
+  },
+  emailEntered: {
+    label: "Email Entered",
+    description: "User provided email in palette flow.",
+    category: "Identity",
+    signal: "high",
+  },
+  "get-font": {
+    label: "Get Font",
+    description: "Request a specific font for import preprocessing.",
+    category: "Import",
+    signal: "medium",
+  },
+  "oauth-token": {
+    label: "OAuth Token Received",
+    description: "OAuth token was received by plugin.",
+    category: "Auth",
+    signal: "high",
+  },
+  "open-auth-url": {
+    label: "Open Auth URL",
+    description: "Launch external auth URL for login.",
+    category: "Auth",
+    signal: "high",
+  },
+  "copy-to-clipboard": {
+    label: "Copy To Clipboard",
+    description: "Copy value from auth/profile section.",
+    category: "Interaction",
+    signal: "medium",
+  },
+  "get-token": {
+    label: "Get Token",
+    description: "Check if auth token exists.",
+    category: "Auth",
+    signal: "low",
+  },
+  "store-token": {
+    label: "Store Token",
+    description: "Persist token and fetch user profile.",
+    category: "Auth",
+    signal: "high",
+  },
+  "clear-token": {
+    label: "Clear Token",
+    description: "Remove auth token from storage.",
+    category: "Auth",
+    signal: "medium",
+  },
+  "get-session": {
+    label: "Get Session",
+    description: "Read current auth session metadata.",
+    category: "Auth",
+    signal: "low",
+  },
+  "store-session": {
+    label: "Store Session",
+    description: "Persist auth session details.",
+    category: "Auth",
+    signal: "medium",
+  },
+  "clear-session": {
+    label: "Clear Session",
+    description: "Clear auth session data.",
+    category: "Auth",
+    signal: "medium",
+  },
+  "store-avatar": {
+    label: "Store Avatar",
+    description: "Persist selected avatar URL.",
+    category: "Profile",
+    signal: "low",
+  },
+  "avatar-selected": {
+    label: "Avatar Selected",
+    description: "User selected profile avatar.",
+    category: "Profile",
+    signal: "medium",
+  },
+  "set-analytics-endpoint": {
+    label: "Set Analytics Endpoint",
+    description: "Update analytics ingest endpoint/token from UI override.",
+    category: "System",
+    signal: "low",
+    passive: true,
+  },
+  "analytics-event": {
+    label: "Analytics Event Forward",
+    description: "Single analytics event passed from UI to main.",
+    category: "System",
+    signal: "low",
+    passive: true,
+  },
+  "analytics-batch": {
+    label: "Analytics Batch Forward",
+    description: "Batch analytics events passed from UI to main.",
+    category: "System",
+    signal: "low",
+    passive: true,
+  },
+  "analytics-identify": {
+    label: "Analytics Identify",
+    description: "Update analytics identity context from UI.",
+    category: "Identity",
+    signal: "low",
+    passive: true,
+  },
+  "analytics-flush": {
+    label: "Analytics Flush",
+    description: "Force flush queued analytics events.",
+    category: "System",
+    signal: "low",
+    passive: true,
+  },
+  "lg-refresh": {
+    label: "Liquid Glass Refresh",
+    description: "Refresh liquid glass capture.",
+    category: "Liquid Glass",
+    signal: "medium",
   },
 }
 
@@ -172,8 +609,12 @@ function humanizeIdentifier(value) {
     .replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
+function normalizeKey(value) {
+  return String(value || "").trim().toLowerCase()
+}
+
 function labelTool(toolId) {
-  const key = String(toolId || "unknown").trim().toLowerCase()
+  const key = normalizeKey(toolId)
   if (!key) return "Unknown Tool"
   if (TOOL_LABELS[key]) return TOOL_LABELS[key]
   return humanizeIdentifier(key)
@@ -200,10 +641,102 @@ function getEventMeta(eventKey) {
   }
 }
 
+function inferActionMeta(actionKey) {
+  const key = String(actionKey || "").trim()
+  const normalized = normalizeKey(key)
+
+  if (!key) {
+    return {
+      key: "unknown_action",
+      label: "Unknown Action",
+      description: "Action key missing in payload.",
+      category: "Unmapped",
+      signal: "low",
+      passive: false,
+    }
+  }
+
+  if (EVENT_METADATA[key]) {
+    const meta = getEventMeta(key)
+    return {
+      key,
+      ...meta,
+    }
+  }
+
+  if (ACTION_METADATA[key]) {
+    const mapped = ACTION_METADATA[key]
+    return {
+      key,
+      ...mapped,
+      passive: Boolean(mapped.passive),
+    }
+  }
+
+  let category = "Custom"
+  let signal = "medium"
+  let passive = false
+
+  if (normalized.startsWith("toggle-") || normalized.includes("collapse")) {
+    category = "Navigation"
+    signal = "high"
+  } else if (normalized.startsWith("get-") || normalized.startsWith("load-")) {
+    category = "Read"
+    signal = "low"
+  } else if (normalized.startsWith("save-") || normalized.startsWith("store-") || normalized.startsWith("delete-") || normalized.startsWith("clear-")) {
+    category = "Write"
+    signal = "medium"
+  } else if (normalized.startsWith("export-")) {
+    category = "Export"
+    signal = "high"
+  } else if (normalized.includes("auth") || normalized.includes("token") || normalized.includes("session")) {
+    category = "Auth"
+    signal = "medium"
+  } else if (normalized.startsWith("analytics-")) {
+    category = "System"
+    signal = "low"
+    passive = true
+  }
+
+  return {
+    key,
+    label: humanizeIdentifier(key),
+    description: "Action observed from plugin message handling.",
+    category,
+    signal,
+    passive,
+  }
+}
+
+function getActionMeta(actionKey) {
+  return inferActionMeta(actionKey)
+}
+
 function signalPillClass(signal) {
   if (signal === "high") return "pill-signal-high"
   if (signal === "medium") return "pill-signal-medium"
   return "pill-signal-low"
+}
+
+function labelUser(user) {
+  const u = user && typeof user === "object" ? user : null
+  if (u && u.isAuthenticated) {
+    return u.name || u.email || u.userId || "Authenticated"
+  }
+
+  const anonymousId = u && u.anonymousId ? String(u.anonymousId) : ""
+  const identitySource = u && u.identitySource ? String(u.identitySource) : ""
+  if (anonymousId) {
+    const suffix = anonymousId.slice(-8)
+    const sourceTag = identitySource.includes("figma")
+      ? "Figma"
+      : identitySource.includes("device")
+      ? "Device"
+      : ""
+    return sourceTag ? `Anon ${suffix} (${sourceTag})` : `Anon ${suffix}`
+  }
+
+  return "Anonymous"
 }
 
 function eventDetailText(event, meta) {
@@ -214,10 +747,19 @@ function eventDetailText(event, meta) {
     return `Time tracked: ${durationLabel(payload.durationMs)} in ${labelTool(event.tool)}`
   }
 
+  if (meta.key === "session_heartbeat") {
+    return `Session active in ${labelTool(payload.activeTool || event.tool)}`
+  }
+
   if (meta.key === "ui_click") {
     const element = payload.element && typeof payload.element === "object" ? payload.element : {}
     const target = element.id || element.toolId || element.tag || "UI control"
     return `Clicked: ${humanizeIdentifier(target)}`
+  }
+
+  if (meta.key === "tool_action") {
+    const actionMeta = getActionMeta(action)
+    return `${actionMeta.label}${payload.tool ? ` on ${labelTool(payload.tool)}` : ""}`
   }
 
   if (meta.key === "tool_opened" || meta.key === "tool_closed" || meta.key === "tool_context_changed") {
@@ -225,18 +767,30 @@ function eventDetailText(event, meta) {
     return `${meta.label} for ${labelTool(toolFromPayload)}`
   }
 
-  if (meta.key === "session_heartbeat") {
-    return "Background health ping, not a direct user action"
-  }
-
   if (meta.key === "plugin_message") {
-    const messageType = payload.type || payload.messageType || payload.action
-    if (messageType) return `Internal message: ${humanizeIdentifier(messageType)}`
+    const messageType = payload.messageType || payload.type || payload.action
+    if (messageType) {
+      const actionMeta = getActionMeta(String(messageType))
+      if (payload.handled === false) {
+        return `Unhandled message: ${actionMeta.label}`
+      }
+      return `Message: ${actionMeta.label}`
+    }
     return "Internal bridge message between UI and plugin runtime"
   }
 
+  if (meta.key === "user_context_changed") {
+    const identitySource = payload.user && payload.user.identitySource
+      ? String(payload.user.identitySource)
+      : ""
+    return identitySource
+      ? `Identity context updated via ${humanizeIdentifier(identitySource)}`
+      : "Identity context updated"
+  }
+
   if (action && action !== meta.key) {
-    return `Action: ${humanizeIdentifier(action)}`
+    const actionMeta = getActionMeta(action)
+    return `Action: ${actionMeta.label}`
   }
 
   return meta.description
@@ -277,6 +831,9 @@ function buildDerivedAnalysis(dashboard) {
       passiveEventCount: Number(toolRow.passiveEventCount || 0),
       clickCount: Number(toolRow.clickCount || 0),
       timeSpentMs: Number(toolRow.timeSpentMs || 0),
+      userCount: Number(toolRow.userCount || 0),
+      authenticatedUserCount: Number(toolRow.authenticatedUserCount || 0),
+      anonymousUserCount: Number(toolRow.anonymousUserCount || 0),
     }))
     .sort((a, b) => b.activeEventCount - a.activeEventCount)
 
@@ -303,46 +860,6 @@ function buildDerivedAnalysis(dashboard) {
     ? topTool.activeEventCount / meaningfulEvents
     : 0
 
-  const notes = []
-
-  if (noiseShare > 0.7) {
-    notes.push({
-      tone: "warn",
-      title: "High system-noise detected",
-      text: `${percentLabel(noiseShare)} of events are system telemetry. Use focus mode to prioritize user intent signals.`,
-    })
-  } else {
-    notes.push({
-      tone: "good",
-      title: "Healthy event quality",
-      text: `${percentLabel(activeShare)} of events are user-driven actions.`,
-    })
-  }
-
-  if (Number(kpis.authenticatedUsers || 0) === 0) {
-    notes.push({
-      tone: "neutral",
-      title: "No authenticated users in this range",
-      text: "Data is currently from anonymous users only. Auth segmentation is available when login events arrive.",
-    })
-  }
-
-  if (topMeaningfulEvent) {
-    notes.push({
-      tone: "neutral",
-      title: `Top intent event: ${topMeaningfulEvent.meta.label}`,
-      text: `${numberLabel(topMeaningfulEvent.count)} occurrences in selected range.`,
-    })
-  }
-
-  if (topTool) {
-    notes.push({
-      tone: "neutral",
-      title: `Most active tool: ${labelTool(topTool.tool)}`,
-      text: `${percentLabel(topToolShare)} of meaningful actions come from this tool.`,
-    })
-  }
-
   return {
     totalEvents,
     meaningfulEvents,
@@ -355,7 +872,7 @@ function buildDerivedAnalysis(dashboard) {
     topMeaningfulEvent,
     topTool,
     topToolShare,
-    notes,
+    anonymousUsers: Number(kpis.anonymousUsers || 0),
   }
 }
 
@@ -407,7 +924,7 @@ function renderKpis(kpis, analysis) {
     {
       label: "Sessions",
       value: numberLabel(kpis.totalSessions),
-      sub: `${numberLabel(kpis.authenticatedUsers)} authenticated users`,
+      sub: `${numberLabel(kpis.authenticatedUsers)} auth • ${numberLabel(kpis.anonymousUsers)} identified anonymous`,
     },
     {
       label: "Active Actions / Session",
@@ -462,21 +979,12 @@ function renderInsights(analysis) {
     text: `${numberLabel(analysis.clickCount)} click interactions captured.`,
   })
 
-  if (analysis.noiseShare > 0.7) {
-    cards.push({
-      tone: "warn",
-      title: "Telemetry Quality Alert",
-      value: "High background noise",
-      text: "Enable focus mode (system events off) for clearer behavior analysis.",
-    })
-  } else {
-    cards.push({
-      tone: "good",
-      title: "Telemetry Quality",
-      value: "Signal is clear",
-      text: `${percentLabel(analysis.activeShare)} of traffic reflects user intent.`,
-    })
-  }
+  cards.push({
+    tone: analysis.anonymousUsers > 0 ? "good" : "warn",
+    title: "Anonymous Identification",
+    value: analysis.anonymousUsers > 0 ? `${numberLabel(analysis.anonymousUsers)} identified users` : "No anon identifiers yet",
+    text: "Anonymous users are shown as pseudonymous IDs when available from runtime context.",
+  })
 
   insightsGrid.innerHTML = cards
     .map(
@@ -495,7 +1003,7 @@ function renderTopActions(actions, totalEvents) {
   const rows = (actions || [])
     .map((item) => {
       const actionKey = String(item.action || "unknown_event")
-      const meta = getEventMeta(actionKey)
+      const meta = getActionMeta(actionKey)
       return {
         actionKey,
         count: Number(item.count || 0),
@@ -511,7 +1019,7 @@ function renderTopActions(actions, totalEvents) {
   }
 
   actionsBody.innerHTML = rows
-    .slice(0, 12)
+    .slice(0, 18)
     .map((row) => {
       const share = totalEvents > 0 ? row.count / totalEvents : 0
       return `
@@ -543,9 +1051,7 @@ function renderSessions(sessions) {
 
   sessionsBody.innerHTML = rows
     .map((session) => {
-      const user = session.user && session.user.isAuthenticated
-        ? `${session.user.name || "User"}${session.user.email ? ` (${session.user.email})` : ""}`
-        : "Anonymous"
+      const user = labelUser(session.user)
 
       const tools = Array.isArray(session.tools)
         ? session.tools
@@ -585,12 +1091,9 @@ function renderRecentEvents(events) {
   }
 
   eventsBody.innerHTML = rows
-    .slice(0, 120)
+    .slice(0, 180)
     .map((event) => {
-      const user = event.user && event.user.isAuthenticated
-        ? event.user.name || event.user.email || "Authenticated"
-        : "Anonymous"
-
+      const user = labelUser(event.user)
       const sessionId = String(event.sessionId || "unknown-session")
       const meta = getEventMeta(event.eventType)
       const detail = eventDetailText(event, meta)
