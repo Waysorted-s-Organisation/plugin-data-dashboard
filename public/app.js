@@ -12,15 +12,16 @@ const fromDateEl = document.getElementById("fromDate")
 const toDateEl = document.getElementById("toDate")
 const toolFilterEl = document.getElementById("toolFilter")
 const authFilterEl = document.getElementById("authFilter")
+const actionFilterEl = document.getElementById("actionFilter")
 const showSystemEventsEl = document.getElementById("showSystemEvents")
 const refreshBtn = document.getElementById("refreshBtn")
 
 const PASSIVE_EVENT_TYPES = new Set([
   "session_heartbeat",
-  "plugin_message",
   "ui_heartbeat",
   "ui_state_snapshot",
   "ui_visibility_change",
+  "ui_resize",
   "analytics_transport_updated",
 ])
 
@@ -118,6 +119,24 @@ const EVENT_METADATA = {
     description: "User clicked a control in plugin UI.",
     category: "Interaction",
     signal: "high",
+  },
+  ui_input_changed: {
+    label: "Input Changed",
+    description: "User changed a field, dropdown, or toggle value.",
+    category: "Interaction",
+    signal: "high",
+  },
+  ui_tab_changed: {
+    label: "Tab Changed",
+    description: "User switched tab/view inside a tool.",
+    category: "Navigation",
+    signal: "high",
+  },
+  ui_keyboard_action: {
+    label: "Keyboard Action",
+    description: "Keyboard-triggered action on an interactive control.",
+    category: "Interaction",
+    signal: "medium",
   },
   ui_scroll: {
     label: "UI Scroll",
@@ -539,6 +558,7 @@ const state = {
   to: new Date(),
   tool: "all",
   auth: "all",
+  action: "all",
   includeSystemEvents: false,
 }
 
@@ -673,6 +693,54 @@ function inferActionMeta(actionKey) {
     }
   }
 
+  if (normalized.startsWith("tab:")) {
+    const tabId = key.slice(4)
+    return {
+      key,
+      label: `Tab: ${humanizeIdentifier(tabId)}`,
+      description: "User switched in-tool tab/view.",
+      category: "Navigation",
+      signal: "high",
+      passive: false,
+    }
+  }
+
+  if (normalized.startsWith("click:")) {
+    const targetId = key.slice(6)
+    return {
+      key,
+      label: `Click: ${humanizeIdentifier(targetId)}`,
+      description: "User clicked an interactive control.",
+      category: "Interaction",
+      signal: "high",
+      passive: false,
+    }
+  }
+
+  if (normalized.startsWith("input:")) {
+    const targetId = key.slice(6)
+    return {
+      key,
+      label: `Input: ${humanizeIdentifier(targetId)}`,
+      description: "User changed an input/dropdown/toggle value.",
+      category: "Interaction",
+      signal: "high",
+      passive: false,
+    }
+  }
+
+  if (normalized.startsWith("key:")) {
+    const targetId = key.slice(4)
+    return {
+      key,
+      label: `Keyboard: ${humanizeIdentifier(targetId)}`,
+      description: "Keyboard-triggered interaction on a control.",
+      category: "Interaction",
+      signal: "medium",
+      passive: false,
+    }
+  }
+
   let category = "Custom"
   let signal = "medium"
   let passive = false
@@ -712,6 +780,25 @@ function getActionMeta(actionKey) {
   return inferActionMeta(actionKey)
 }
 
+function resolveEventAction(event) {
+  const payload = event && event.payload && typeof event.payload === "object" ? event.payload : {}
+  return String(
+    payload.action ||
+      payload.messageType ||
+      payload.interactionAction ||
+      payload.type ||
+      event.eventType ||
+      "unknown_event"
+  ).trim()
+}
+
+function eventIsPassive(event) {
+  const eventMeta = getEventMeta(event && event.eventType)
+  if (eventMeta.passive) return true
+  const actionMeta = getActionMeta(resolveEventAction(event))
+  return Boolean(actionMeta.passive)
+}
+
 function signalPillClass(signal) {
   if (signal === "high") return "pill-signal-high"
   if (signal === "medium") return "pill-signal-medium"
@@ -741,7 +828,7 @@ function labelUser(user) {
 
 function eventDetailText(event, meta) {
   const payload = event && event.payload && typeof event.payload === "object" ? event.payload : {}
-  const action = String(payload.action || "").trim()
+  const action = resolveEventAction(event)
 
   if (meta.key === "tool_time_spent") {
     return `Time tracked: ${durationLabel(payload.durationMs)} in ${labelTool(event.tool)}`
@@ -753,8 +840,32 @@ function eventDetailText(event, meta) {
 
   if (meta.key === "ui_click") {
     const element = payload.element && typeof payload.element === "object" ? payload.element : {}
-    const target = element.id || element.toolId || element.tag || "UI control"
+    const target = payload.actionLabel || element.id || element.toolId || element.tag || "UI control"
     return `Clicked: ${humanizeIdentifier(target)}`
+  }
+
+  if (meta.key === "ui_tab_changed") {
+    const fromTab = payload.fromTab ? humanizeIdentifier(payload.fromTab) : "Unknown"
+    const toTab = payload.toTab ? humanizeIdentifier(payload.toTab) : "Unknown"
+    return `Tab switch: ${fromTab} -> ${toTab}`
+  }
+
+  if (meta.key === "ui_input_changed") {
+    const input = payload.input && typeof payload.input === "object" ? payload.input : {}
+    const target = payload.actionLabel || "Input"
+    if (typeof input.valueLength === "number") {
+      return `${humanizeIdentifier(target)} updated (length ${input.valueLength})`
+    }
+    if (typeof input.checked === "boolean") {
+      return `${humanizeIdentifier(target)} set to ${input.checked ? "ON" : "OFF"}`
+    }
+    return `${humanizeIdentifier(target)} changed`
+  }
+
+  if (meta.key === "ui_keyboard_action") {
+    const keyName = payload.key || "Key"
+    const target = payload.actionLabel || "control"
+    return `Keyboard ${keyName}: ${humanizeIdentifier(target)}`
   }
 
   if (meta.key === "tool_action") {
@@ -788,7 +899,7 @@ function eventDetailText(event, meta) {
       : "Identity context updated"
   }
 
-  if (action && action !== meta.key) {
+  if (action && action !== meta.key && action !== event.eventType) {
     const actionMeta = getActionMeta(action)
     return `Action: ${actionMeta.label}`
   }
@@ -888,6 +999,10 @@ function getQueryParams() {
 
   if (state.auth && state.auth !== "all") {
     params.set("auth", state.auth)
+  }
+
+  if (state.action && state.action !== "all") {
+    params.set("action", state.action)
   }
 
   return params
@@ -1080,10 +1195,7 @@ function renderSessions(sessions) {
 }
 
 function renderRecentEvents(events) {
-  const rows = (events || []).filter((event) => {
-    const meta = getEventMeta(event.eventType)
-    return state.includeSystemEvents || !meta.passive
-  })
+  const rows = (events || []).filter((event) => state.includeSystemEvents || !eventIsPassive(event))
 
   if (!rows.length) {
     eventsBody.innerHTML = `<tr><td colspan="6">No user-intent events in this range.</td></tr>`
@@ -1097,6 +1209,7 @@ function renderRecentEvents(events) {
       const sessionId = String(event.sessionId || "unknown-session")
       const meta = getEventMeta(event.eventType)
       const detail = eventDetailText(event, meta)
+      const actionMeta = getActionMeta(resolveEventAction(event))
 
       return `
         <tr>
@@ -1104,6 +1217,7 @@ function renderRecentEvents(events) {
           <td>
             <div class="event-title">${escapeHtml(meta.label)}</div>
             <div class="event-detail">${escapeHtml(detail)}</div>
+            <div class="event-detail mono">${escapeHtml(actionMeta.label)}</div>
           </td>
           <td>${escapeHtml(labelTool(event.tool))}</td>
           <td><span class="pill ${signalPillClass(meta.signal)}">${escapeHtml(meta.signal.toUpperCase())}</span></td>
@@ -1332,6 +1446,49 @@ function updateToolFilterOptions(tools) {
   }
 }
 
+function updateActionFilterOptions(catalog, fallbackActions = []) {
+  const currentValue = actionFilterEl.value || state.action || "all"
+  const preferredActions = Array.isArray(catalog) ? catalog : []
+  const fallback = (fallbackActions || []).map((row) => ({
+    action: row && row.action,
+    count: row && row.count,
+  }))
+
+  const merged = preferredActions.length ? preferredActions : fallback
+  const options = [{ action: "all", count: null }]
+  const seen = new Set(["all"])
+
+  for (const row of merged) {
+    const action = String((row && row.action) || "").trim()
+    if (!action || seen.has(action)) continue
+    const meta = getActionMeta(action)
+    if (!state.includeSystemEvents && meta.passive) continue
+    seen.add(action)
+    options.push({
+      action,
+      count: Number((row && row.count) || 0),
+    })
+  }
+
+  actionFilterEl.innerHTML = options
+    .map((row) => {
+      if (row.action === "all") {
+        return `<option value="all">All actions</option>`
+      }
+      const meta = getActionMeta(row.action)
+      const label = `${meta.label}${row.count ? ` (${numberLabel(row.count)})` : ""}`
+      return `<option value="${escapeHtml(row.action)}">${escapeHtml(label)}</option>`
+    })
+    .join("")
+
+  if (seen.has(currentValue)) {
+    actionFilterEl.value = currentValue
+  } else {
+    actionFilterEl.value = "all"
+    state.action = "all"
+  }
+}
+
 async function loadDashboard(options = {}) {
   const silent = Boolean(options.silent)
 
@@ -1369,12 +1526,15 @@ async function loadDashboard(options = {}) {
     const toolUsage = dashboard.toolUsage || {}
     const sessions = dashboard.sessions || {}
     const recentEvents = dashboard.recentEvents || {}
+    const actionCatalog = dashboard.actionCatalog || {}
     const analysis = buildDerivedAnalysis(dashboard)
 
     const nextRenderFingerprint = JSON.stringify({
       includeSystemEvents: state.includeSystemEvents,
+      action: state.action,
       kpis: summary.kpis || {},
       topActions: summary.topActions || [],
+      actionCatalog: actionCatalog.actions || [],
       eventTypeBreakdown: dashboard.eventTypeBreakdown || [],
       eventsByDay: summary.eventsByDay || [],
       toolUsage: toolUsage.tools || [],
@@ -1400,6 +1560,7 @@ async function loadDashboard(options = {}) {
     renderSessions(sessions.sessions || [])
     renderRecentEvents(recentEvents.events || [])
     updateToolFilterOptions(toolUsage.tools || [])
+    updateActionFilterOptions(actionCatalog.actions || [], summary.topActions || [])
 
     const elapsedMs = Math.round(performance.now() - startedAt)
     setStatus(
@@ -1472,6 +1633,11 @@ function bindControls() {
     scheduleLoad(80)
   })
 
+  actionFilterEl.addEventListener("change", () => {
+    state.action = actionFilterEl.value
+    scheduleLoad(80)
+  })
+
   showSystemEventsEl.addEventListener("change", () => {
     state.includeSystemEvents = Boolean(showSystemEventsEl.checked)
     scheduleLoad(20)
@@ -1494,6 +1660,8 @@ function startRealtimeRefresh() {
 function init() {
   applyPreset("7d")
   authFilterEl.value = "all"
+  actionFilterEl.value = "all"
+  state.action = "all"
   showSystemEventsEl.checked = false
   state.includeSystemEvents = false
   bindControls()

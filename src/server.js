@@ -26,7 +26,23 @@ const READ_USER = (process.env.DASHBOARD_BASIC_AUTH_USER || "").trim();
 const READ_PASS = (process.env.DASHBOARD_BASIC_AUTH_PASS || "").trim();
 let initializationPromise = null;
 let isInitialized = false;
-const PASSIVE_EVENT_TYPES = ["session_heartbeat", "plugin_message"];
+const PASSIVE_EVENT_TYPES = [
+  "session_heartbeat",
+  "ui_heartbeat",
+  "ui_state_snapshot",
+  "ui_visibility_change",
+  "analytics_transport_updated",
+];
+const PASSIVE_ACTION_KEYS = [
+  "get-ui-state",
+  "notify",
+  "ui-loaded",
+  "set-analytics-endpoint",
+  "analytics-event",
+  "analytics-batch",
+  "analytics-identify",
+  "analytics-flush",
+];
 const MAX_EVENT_TYPE_BREAKDOWN = 40;
 
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -79,6 +95,64 @@ function toDate(value, fallbackDate) {
 function toNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function addMatchClause(match, clause) {
+  if (!clause || typeof clause !== "object") return;
+  if (!match.$and) {
+    match.$and = [clause];
+    return;
+  }
+  match.$and.push(clause);
+}
+
+function parseActionFilter(value) {
+  const raw = safeString(value, 500);
+  if (!raw || raw === "all") return [];
+  const actions = raw
+    .split(",")
+    .map((item) => safeString(item, 120))
+    .filter(Boolean)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return Array.from(new Set(actions)).slice(0, 30);
+}
+
+function actionProjectionExpression() {
+  return {
+    $ifNull: [
+      "$payload.action",
+      {
+        $ifNull: [
+          "$payload.messageType",
+          {
+            $ifNull: [
+              "$payload.interactionAction",
+              {
+                $ifNull: ["$payload.type", "$eventType"],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function passiveEventExpression() {
+  const actionExpr = actionProjectionExpression();
+  return {
+    $or: [
+      { $in: ["$eventType", PASSIVE_EVENT_TYPES] },
+      { $in: [actionExpr, PASSIVE_ACTION_KEYS] },
+      {
+        $regexMatch: {
+          input: { $toLower: { $ifNull: [actionExpr, ""] } },
+          regex: "^analytics-",
+        },
+      },
+    ],
+  };
 }
 
 function stableHashId(input) {
@@ -339,7 +413,8 @@ function sanitizePayload(payload) {
   return result;
 }
 
-function buildMatch(query) {
+function buildMatch(query, options = {}) {
+  const includeAction = options.includeAction !== false;
   const { from, to } = parseDateRange(query);
   const match = {
     eventAt: { $gte: from, $lte: to },
@@ -355,6 +430,21 @@ function buildMatch(query) {
     match["user.isAuthenticated"] = true;
   } else if (auth === "anonymous") {
     match["user.isAuthenticated"] = false;
+  }
+
+  if (includeAction) {
+    const actions = parseActionFilter(query.action);
+    if (actions.length) {
+      addMatchClause(match, {
+        $or: [
+          { eventType: { $in: actions } },
+          { "payload.action": { $in: actions } },
+          { "payload.messageType": { $in: actions } },
+          { "payload.interactionAction": { $in: actions } },
+          { "payload.type": { $in: actions } },
+        ],
+      });
+    }
   }
 
   return { match, from, to };
@@ -558,12 +648,12 @@ async function fetchSummaryData(eventsCollection, match) {
             sessions: { $addToSet: "$sessionId" },
             activeEvents: {
               $sum: {
-                $cond: [{ $in: ["$eventType", PASSIVE_EVENT_TYPES] }, 0, 1],
+                $cond: [passiveEventExpression(), 0, 1],
               },
             },
             passiveEvents: {
               $sum: {
-                $cond: [{ $in: ["$eventType", PASSIVE_EVENT_TYPES] }, 1, 0],
+                $cond: [passiveEventExpression(), 1, 0],
               },
             },
             timeSpentMs: {
@@ -604,19 +694,7 @@ async function fetchSummaryData(eventsCollection, match) {
         { $match: match },
         {
           $project: {
-            action: {
-              $ifNull: [
-                "$payload.action",
-                {
-                  $ifNull: [
-                    "$payload.messageType",
-                    {
-                      $ifNull: ["$payload.type", "$eventType"],
-                    },
-                  ],
-                },
-              ],
-            },
+            action: actionProjectionExpression(),
           },
         },
         {
@@ -626,7 +704,7 @@ async function fetchSummaryData(eventsCollection, match) {
           },
         },
         { $sort: { count: -1 } },
-        { $limit: 15 },
+        { $limit: 30 },
         {
           $project: {
             _id: 0,
@@ -685,6 +763,37 @@ async function fetchSummaryData(eventsCollection, match) {
   };
 }
 
+async function fetchActionCatalog(eventsCollection, match, limit = 180) {
+  return eventsCollection
+    .aggregate([
+      { $match: match },
+      {
+        $project: {
+          action: actionProjectionExpression(),
+          eventType: 1,
+        },
+      },
+      {
+        $group: {
+          _id: "$action",
+          count: { $sum: 1 },
+          eventTypes: { $addToSet: "$eventType" },
+        },
+      },
+      { $sort: { count: -1, _id: 1 } },
+      { $limit: limit },
+      {
+        $project: {
+          _id: 0,
+          action: "$_id",
+          count: 1,
+          eventTypes: 1,
+        },
+      },
+    ])
+    .toArray();
+}
+
 async function fetchToolUsageData(eventsCollection, match) {
   return eventsCollection
     .aggregate([
@@ -695,12 +804,12 @@ async function fetchToolUsageData(eventsCollection, match) {
           eventCount: { $sum: 1 },
           activeEventCount: {
             $sum: {
-              $cond: [{ $in: ["$eventType", PASSIVE_EVENT_TYPES] }, 0, 1],
+              $cond: [passiveEventExpression(), 0, 1],
             },
           },
           passiveEventCount: {
             $sum: {
-              $cond: [{ $in: ["$eventType", PASSIVE_EVENT_TYPES] }, 1, 0],
+              $cond: [passiveEventExpression(), 1, 0],
             },
           },
           clickCount: {
@@ -835,12 +944,12 @@ async function fetchSessionsData(eventsCollection, match, limit = 60) {
           eventCount: { $sum: 1 },
           activeEventCount: {
             $sum: {
-              $cond: [{ $in: ["$eventType", PASSIVE_EVENT_TYPES] }, 0, 1],
+              $cond: [passiveEventExpression(), 0, 1],
             },
           },
           passiveEventCount: {
             $sum: {
-              $cond: [{ $in: ["$eventType", PASSIVE_EVENT_TYPES] }, 1, 0],
+              $cond: [passiveEventExpression(), 1, 0],
             },
           },
           user: { $last: "$user" },
@@ -1062,6 +1171,7 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
   try {
     const eventsCollection = await getEventsCollection();
     const { match, from, to } = buildMatch(req.query);
+    const { match: baseMatch } = buildMatch(req.query, { includeAction: false });
     const toolFilter = safeString(req.query.tool, 120);
     const heatmapCompact = parseBool(req.query.heatmapCompact, true);
     const heatmapLimit = heatmapCompact
@@ -1072,7 +1182,7 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
     const sessionsLimit = parseLimit(req.query.sessionsLimit, 60, 300);
     const recentEventsLimit = parseLimit(req.query.eventsLimit, 100, 1000);
 
-    const [summary, tools, heatmap, sessions, events, eventTypeBreakdown] = await Promise.all([
+    const [summary, tools, heatmap, sessions, events, eventTypeBreakdown, actionCatalog] = await Promise.all([
       fetchSummaryData(eventsCollection, match),
       fetchToolUsageData(eventsCollection, match),
       fetchHeatmapData(eventsCollection, match, {
@@ -1085,12 +1195,14 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
       fetchSessionsData(eventsCollection, match, sessionsLimit),
       fetchRecentEventsData(eventsCollection, match, recentEventsLimit),
       fetchEventTypeBreakdown(eventsCollection, match),
+      fetchActionCatalog(eventsCollection, baseMatch),
     ]);
 
     return res.json({
       from,
       to,
       summary,
+      actionCatalog: { actions: actionCatalog },
       toolUsage: { tools },
       eventTypeBreakdown,
       heatmap,
