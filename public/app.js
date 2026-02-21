@@ -629,9 +629,9 @@ let activeLoadController = null
 let currentLoadToken = 0
 let realtimeRefreshTimer = null
 let lastRenderFingerprint = ""
-const REALTIME_REFRESH_MS = 8000
+const REALTIME_REFRESH_MS = 12000
 let latestHeatmapPayload = null
-let heatmapResizeObserver = null
+let heatmapResizeTimer = null
 
 if (typeof window !== "undefined" && window.Chart) {
   window.Chart.defaults.color = "#a9b7e5"
@@ -691,7 +691,7 @@ function humanizeIdentifier(value) {
   const raw = String(value || "").trim()
   if (!raw) return "Unknown"
   return raw
-    .replace(/[._-]+/g, " ")
+    .replace(/[:._-]+/g, " ")
     .replace(/\s+/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase())
 }
@@ -1957,23 +1957,13 @@ function startRealtimeRefresh() {
 
 function bindHeatmapResize() {
   if (!heatmapCanvas) return
-  if (heatmapResizeObserver) {
-    heatmapResizeObserver.disconnect()
-    heatmapResizeObserver = null
-  }
-
   const redraw = () => {
     if (!latestHeatmapPayload) return
-    drawHeatmap(latestHeatmapPayload)
-  }
-
-  if (typeof ResizeObserver !== "undefined") {
-    heatmapResizeObserver = new ResizeObserver(() => {
-      redraw()
-    })
-    if (heatmapCanvas.parentElement) {
-      heatmapResizeObserver.observe(heatmapCanvas.parentElement)
-    }
+    if (heatmapResizeTimer) clearTimeout(heatmapResizeTimer)
+    heatmapResizeTimer = setTimeout(() => {
+      heatmapResizeTimer = null
+      drawHeatmap(latestHeatmapPayload)
+    }, 90)
   }
 
   window.addEventListener("resize", redraw)

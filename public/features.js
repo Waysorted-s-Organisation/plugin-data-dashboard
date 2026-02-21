@@ -19,6 +19,11 @@ const compressionBreakdownEl = document.getElementById("compressionBreakdown")
 const colorModeBreakdownEl = document.getElementById("colorModeBreakdown")
 const mergeSummaryEl = document.getElementById("mergeSummary")
 const mergeDistBody = document.getElementById("mergeDistBody")
+const featureCoverageMetaEl = document.getElementById("featureCoverageMeta")
+const featureCatalogBody = document.getElementById("featureCatalogBody")
+const featureStatusFilterEl = document.getElementById("featureStatusFilter")
+const featureCategoryFilterEl = document.getElementById("featureCategoryFilter")
+const featureSearchInputEl = document.getElementById("featureSearchInput")
 
 const TOOL_LABELS = {
   dashboard: "Plugin Dashboard",
@@ -41,10 +46,14 @@ const state = {
   tool: "all",
   auth: "all",
   action: "all",
+  featureStatus: "all",
+  featureCategory: "all",
+  featureSearch: "",
 }
 
 let loadDebounceTimer = null
 let realtimeTimer = null
+let featureCatalogCache = []
 
 function escapeHtml(value) {
   const text = String(value === null || value === undefined ? "" : value)
@@ -100,7 +109,7 @@ function humanizeIdentifier(value) {
   const raw = String(value || "").trim()
   if (!raw) return "Unknown"
   return raw
-    .replace(/[._-]+/g, " ")
+    .replace(/[:._-]+/g, " ")
     .replace(/\s+/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase())
 }
@@ -131,6 +140,19 @@ function prettyPaletteLabel(value) {
   }
 
   return humanizeIdentifier(raw)
+}
+
+function featureKindLabel(kind) {
+  if (kind === "action") return "Plugin Action"
+  if (kind === "event") return "Feature Event"
+  return humanizeIdentifier(kind || "feature")
+}
+
+function formatLastSeen(value) {
+  if (!value) return "-"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "-"
+  return date.toLocaleString()
 }
 
 function getQueryParams() {
@@ -271,6 +293,18 @@ function renderKpis(features) {
       label: "Large Files (Import/Export)",
       value: importLarge + exportLarge,
       sub: `${numberLabel(importLarge)} import • ${numberLabel(exportLarge)} export`,
+    },
+    {
+      label: "Active Features",
+      value: numberLabel(kpis.activeFeatureCount || 0),
+      sub: `${numberLabel(kpis.trackableFeatureCount || 0)} total trackable`,
+      tone: "good",
+    },
+    {
+      label: "Feature Coverage",
+      value: `${(Number(kpis.featureCoverageRate || 0) * 100).toFixed(1)}%`,
+      sub: kpis.topFeature ? `Top: ${kpis.topFeature.label || kpis.topFeature.key}` : "Top: -",
+      tone: "good",
     },
   ]
 
@@ -427,6 +461,84 @@ function updateActionFilterOptions(actions) {
   }
 }
 
+function updateFeatureCategoryOptions(rows) {
+  const current = featureCategoryFilterEl.value || state.featureCategory
+  const categories = Array.from(
+    new Set((rows || []).map((row) => String(row.category || "").trim()).filter(Boolean))
+  ).sort((a, b) => a.localeCompare(b))
+
+  const options = ["all", ...categories]
+  featureCategoryFilterEl.innerHTML = options
+    .map((value) => {
+      const label = value === "all" ? "All categories" : value
+      return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`
+    })
+    .join("")
+
+  if (options.includes(current)) {
+    featureCategoryFilterEl.value = current
+  } else {
+    featureCategoryFilterEl.value = "all"
+    state.featureCategory = "all"
+  }
+}
+
+function renderFeatureCatalog(features) {
+  const rows = Array.isArray(features && features.featureCatalog) ? features.featureCatalog : []
+  featureCatalogCache = rows
+  updateFeatureCategoryOptions(rows)
+
+  const filtered = rows.filter((row) => {
+    if (state.featureStatus !== "all" && row.status !== state.featureStatus) return false
+    if (state.featureCategory !== "all" && row.category !== state.featureCategory) return false
+    if (state.featureSearch) {
+      const search = state.featureSearch
+      const haystack = [
+        row.label,
+        row.key,
+        row.category,
+        row.tool,
+        row.kind,
+        row.source,
+      ]
+        .map((value) => String(value || "").toLowerCase())
+        .join(" ")
+      if (!haystack.includes(search)) return false
+    }
+    return true
+  })
+
+  const activeCount = rows.filter((row) => row.status === "active").length
+  featureCoverageMetaEl.textContent = `${numberLabel(activeCount)} active / ${numberLabel(rows.length)} listed`
+
+  if (!filtered.length) {
+    featureCatalogBody.innerHTML = `<tr><td colspan="8">No feature rows match current filters.</td></tr>`
+    return
+  }
+
+  featureCatalogBody.innerHTML = filtered
+    .slice(0, 1000)
+    .map((row) => {
+      const featureTitle = row.label || humanizeIdentifier(row.key)
+      const featureSub = row.key ? `<div class="event-detail mono">${escapeHtml(row.key)}</div>` : ""
+      const statusPillClass = row.status === "active" ? "pill-signal-high" : "pill-muted"
+      return `<tr>
+        <td>
+          <div class="event-title">${escapeHtml(featureTitle)}</div>
+          ${featureSub}
+        </td>
+        <td><span class="pill ${escapeHtml(statusPillClass)}">${escapeHtml(featureKindLabel(row.kind))}</span></td>
+        <td>${escapeHtml(labelTool(row.tool))}</td>
+        <td>${escapeHtml(row.category || "Unknown")}</td>
+        <td>${numberLabel(row.count)}</td>
+        <td>${numberLabel(row.sessionCount)}</td>
+        <td>${numberLabel(row.userCount)}</td>
+        <td>${escapeHtml(formatLastSeen(row.lastSeen))}</td>
+      </tr>`
+    })
+    .join("")
+}
+
 async function loadFeatures(options = {}) {
   const query = getQueryParams().toString()
   const silent = Boolean(options.silent)
@@ -437,7 +549,7 @@ async function loadFeatures(options = {}) {
 
   try {
     const [features, dashboard] = await Promise.all([
-      fetchJson(`/api/plugin-analytics/features?${query}`),
+      fetchJson(`/api/plugin-analytics/features?${query}&featureCatalogLimit=1200`),
       fetchJson(`/api/plugin-analytics/dashboard?${query}&eventsLimit=1&sessionsLimit=1&heatmapLimit=1`),
     ])
 
@@ -451,6 +563,7 @@ async function loadFeatures(options = {}) {
     renderBucketGrid(compressionBreakdownEl, features.compressionBreakdown || [], "compression")
     renderBucketGrid(colorModeBreakdownEl, features.colorModeBreakdown || [], "colorMode")
     renderMergeSummary(features)
+    renderFeatureCatalog(features)
     updateToolFilterOptions((dashboard.toolUsage && dashboard.toolUsage.tools) || [])
     updateActionFilterOptions((dashboard.actionCatalog && dashboard.actionCatalog.actions) || [])
 
@@ -512,6 +625,18 @@ function bindControls() {
     state.action = actionFilterEl.value
     scheduleLoad(60)
   })
+  featureStatusFilterEl.addEventListener("change", () => {
+    state.featureStatus = featureStatusFilterEl.value
+    renderFeatureCatalog({ featureCatalog: featureCatalogCache })
+  })
+  featureCategoryFilterEl.addEventListener("change", () => {
+    state.featureCategory = featureCategoryFilterEl.value
+    renderFeatureCatalog({ featureCatalog: featureCatalogCache })
+  })
+  featureSearchInputEl.addEventListener("input", () => {
+    state.featureSearch = String(featureSearchInputEl.value || "").trim().toLowerCase()
+    renderFeatureCatalog({ featureCatalog: featureCatalogCache })
+  })
   refreshBtn.addEventListener("click", () => loadFeatures())
 }
 
@@ -520,6 +645,9 @@ function init() {
   toolFilterEl.value = "all"
   authFilterEl.value = "all"
   actionFilterEl.value = "all"
+  featureStatusFilterEl.value = "all"
+  featureCategoryFilterEl.value = "all"
+  featureSearchInputEl.value = ""
   bindControls()
   loadFeatures()
   startRealtimeRefresh()

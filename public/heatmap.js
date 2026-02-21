@@ -34,7 +34,7 @@ const state = {
 let loadDebounceTimer = null
 let realtimeTimer = null
 let latestHeatmap = null
-let resizeObserver = null
+let resizeTimer = null
 
 function escapeHtml(value) {
   const text = String(value === null || value === undefined ? "" : value)
@@ -73,7 +73,7 @@ function humanizeIdentifier(value) {
   const raw = String(value || "").trim()
   if (!raw) return "Unknown"
   return raw
-    .replace(/[._-]+/g, " ")
+    .replace(/[:._-]+/g, " ")
     .replace(/\s+/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase())
 }
@@ -346,26 +346,17 @@ function startRealtimeRefresh() {
   realtimeTimer = setInterval(() => {
     if (document.visibilityState !== "visible") return
     loadHeatmap({ silent: true })
-  }, 10000)
+  }, 12000)
 }
 
 function bindResize() {
-  if (resizeObserver) {
-    resizeObserver.disconnect()
-    resizeObserver = null
-  }
-
   const redraw = () => {
-    if (latestHeatmap) {
+    if (!latestHeatmap) return
+    if (resizeTimer) clearTimeout(resizeTimer)
+    resizeTimer = setTimeout(() => {
+      resizeTimer = null
       drawHeatmap(latestHeatmap)
-    }
-  }
-
-  if (typeof ResizeObserver !== "undefined") {
-    resizeObserver = new ResizeObserver(() => redraw())
-    if (heatmapCanvas.parentElement) {
-      resizeObserver.observe(heatmapCanvas.parentElement)
-    }
+    }, 90)
   }
 
   window.addEventListener("resize", redraw)

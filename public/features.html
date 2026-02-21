@@ -150,6 +150,50 @@
       </div>
     </section>
 
+    <section class="card">
+      <div class="card-title-row">
+        <h2>Full Plugin Feature Coverage</h2>
+        <span id="featureCoverageMeta" class="muted">-</span>
+      </div>
+      <div class="feature-filter-row">
+        <label>
+          Feature status
+          <select id="featureStatusFilter">
+            <option value="all">All</option>
+            <option value="active">Active only</option>
+            <option value="inactive">Inactive only</option>
+          </select>
+        </label>
+        <label>
+          Category
+          <select id="featureCategoryFilter">
+            <option value="all">All categories</option>
+          </select>
+        </label>
+        <label>
+          Search
+          <input id="featureSearchInput" type="text" placeholder="Search feature/action/tool..." />
+        </label>
+      </div>
+      <div class="table-wrap feature-catalog-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Feature</th>
+              <th>Type</th>
+              <th>Tool</th>
+              <th>Category</th>
+              <th>Events</th>
+              <th>Sessions</th>
+              <th>Users</th>
+              <th>Last Seen</th>
+            </tr>
+          </thead>
+          <tbody id="featureCatalogBody"></tbody>
+        </table>
+      </div>
+    </section>
+
     <p id="statusLine" class="status">Loading…</p>
 
     <script type="module" src="/features.js"></script>

@@ -195,6 +195,7 @@ const ACTION_TO_TOOL = {
   "color-copied": "palettable",
   "copy-link": "palettable",
   notify: "palettable",
+  emailentered: "palettable",
   "toggle-frame-gallery": "frame-gallery",
   "toggle-manual-selection": "frame-gallery",
   "clear-manual-selection": "frame-gallery",
@@ -238,7 +239,285 @@ const ACTION_TO_TOOL = {
   "resize-expanded": "dashboard",
   "resize-window": "dashboard",
   "get-ui-state": "dashboard",
+  "analytics-event": "dashboard",
+  "analytics-batch": "dashboard",
+  "analytics-identify": "dashboard",
+  "analytics-flush": "dashboard",
+  "set-analytics-endpoint": "dashboard",
 };
+
+const FEATURE_EVENT_DEFINITIONS = [
+  {
+    key: "palette_export_performed",
+    label: "Palette Export Performed",
+    category: "Palette",
+    tool: "palettable",
+    source: "feature-event",
+  },
+  {
+    key: "tool_favorite_changed",
+    label: "Tool Favorite Changed",
+    category: "Engagement",
+    tool: "dashboard",
+    source: "feature-event",
+  },
+  {
+    key: "import_file_selected",
+    label: "Import File Selected",
+    category: "Import",
+    tool: "import-tool",
+    source: "feature-event",
+  },
+  {
+    key: "import_conversion_completed",
+    label: "Import Conversion Completed",
+    category: "Import",
+    tool: "import-tool",
+    source: "feature-event",
+  },
+  {
+    key: "pdf_export_requested",
+    label: "PDF Export Requested",
+    category: "Export",
+    tool: "frame-gallery",
+    source: "feature-event",
+  },
+  {
+    key: "pdf_merge_group_exported",
+    label: "Merged PDF Group Exported",
+    category: "Export",
+    tool: "frame-gallery",
+    source: "feature-event",
+  },
+  {
+    key: "pdf_individual_exported",
+    label: "Individual PDF Exported",
+    category: "Export",
+    tool: "frame-gallery",
+    source: "feature-event",
+  },
+  {
+    key: "pdf_export_completed",
+    label: "PDF Export Completed",
+    category: "Export",
+    tool: "frame-gallery",
+    source: "feature-event",
+  },
+  {
+    key: "ui_tab_changed",
+    label: "In-Tool Tab Changed",
+    category: "Interaction",
+    tool: "dashboard",
+    source: "interaction-event",
+  },
+  {
+    key: "ui_input_changed",
+    label: "Input Changed",
+    category: "Interaction",
+    tool: "dashboard",
+    source: "interaction-event",
+  },
+  {
+    key: "ui_click",
+    label: "UI Click",
+    category: "Interaction",
+    tool: "dashboard",
+    source: "interaction-event",
+  },
+  {
+    key: "ui_keyboard_action",
+    label: "Keyboard Action",
+    category: "Interaction",
+    tool: "dashboard",
+    source: "interaction-event",
+  },
+];
+
+const ACTION_LABEL_OVERRIDES = {
+  "toggle-palette": "Toggle Palette Tool",
+  "toggle-frame-gallery": "Toggle Frame Gallery",
+  "toggle-import-tool": "Toggle Import Tool",
+  "toggle-unit-converter": "Toggle Unit Converter",
+  "toggle-profile": "Toggle Profile",
+  "toggle-game": "Toggle Wayfall Game",
+  "toggle-liquid-glass": "Toggle Liquid Glass",
+  "toggle-manual-selection": "Toggle Manual Selection",
+  "clear-manual-selection": "Clear Manual Selection",
+  "get-manual-selection-state": "Get Manual Selection State",
+  "get-all-frames": "Get All Frames",
+  "export-frames-with-dpi": "Export Frames With DPI",
+  "export-zip-with-password": "Export ZIP With Password",
+  "export-palette": "Export Palette",
+  "export-color-schemes": "Export Color Schemes",
+  "export-selected-options": "Export Selected Options",
+  "start-eyedropper": "Start Eyedropper",
+  "color-copied": "Color Copied",
+  "copy-link": "Copy Link",
+  "check-font-availability": "Check Font Availability",
+  "import-svg-to-figma": "Import SVG To Figma",
+  "load-liked-presets": "Load Liked Presets",
+  "save-liked-presets": "Save Liked Presets",
+  "load-presets": "Load Presets",
+  "save-preset": "Save Preset",
+  "delete-preset": "Delete Preset",
+  "apply-preset": "Apply Preset",
+  "create-frame": "Create Frame",
+  "convert-units": "Convert Units",
+  "export-frame": "Export Frame",
+  "toggle-collapse": "Toggle Collapse",
+  "tool-collapsed": "Tool Collapsed",
+  "palette-to-collapsed": "Palette To Collapsed",
+  "resize-expanded": "Resize Expanded",
+  "resize-window": "Resize Window",
+  "open-auth-url": "Open Auth URL",
+  "oauth-token": "OAuth Token",
+  "get-token": "Get Token",
+  "store-token": "Store Token",
+  "clear-token": "Clear Token",
+  "get-session": "Get Session",
+  "store-session": "Store Session",
+  "clear-session": "Clear Session",
+  "store-avatar": "Store Avatar",
+  "avatar-selected": "Avatar Selected",
+  "copy-to-clipboard": "Copy To Clipboard",
+  "get-font": "Get Font",
+  "get-ui-state": "Get UI State",
+  "set-analytics-endpoint": "Set Analytics Endpoint",
+  "analytics-event": "Analytics Event Relay",
+  "analytics-batch": "Analytics Batch Relay",
+  "analytics-identify": "Analytics Identify",
+  "analytics-flush": "Analytics Flush",
+  "lg-refresh": "Liquid Glass Refresh",
+};
+
+function humanizeFeatureKey(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "Unknown";
+  return raw
+    .replace(/[:._-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function inferFeatureCategory(key) {
+  const normalized = String(key || "").toLowerCase();
+  if (!normalized) return "Custom";
+  if (normalized.startsWith("toggle-") || normalized.includes("collapsed")) {
+    return "Navigation";
+  }
+  if (
+    normalized.startsWith("export-") ||
+    normalized.startsWith("export:") ||
+    normalized.startsWith("pdf_export_") ||
+    normalized.includes("zip")
+  ) {
+    return "Export";
+  }
+  if (normalized.startsWith("import:")) {
+    return "Import";
+  }
+  if (normalized.startsWith("palette:")) {
+    return "Palette";
+  }
+  if (
+    normalized.includes("palette") ||
+    normalized.includes("eyedropper") ||
+    normalized.includes("color")
+  ) {
+    return "Palette";
+  }
+  if (normalized.includes("import") || normalized.includes("font")) {
+    return "Import";
+  }
+  if (normalized.includes("frame") || normalized.includes("manual-selection")) {
+    return "Frame Workflow";
+  }
+  if (
+    normalized.includes("preset") ||
+    normalized.includes("unit") ||
+    normalized === "convert-units"
+  ) {
+    return "Unit Converter";
+  }
+  if (
+    normalized.includes("auth") ||
+    normalized.includes("token") ||
+    normalized.includes("session") ||
+    normalized.includes("avatar") ||
+    normalized.includes("profile")
+  ) {
+    return "Auth/Profile";
+  }
+  if (normalized.startsWith("analytics-") || normalized === "set-analytics-endpoint") {
+    return "System";
+  }
+  if (
+    normalized.startsWith("get-") ||
+    normalized.startsWith("load-") ||
+    normalized.startsWith("ui_")
+  ) {
+    return "Read";
+  }
+  if (
+    normalized.startsWith("save-") ||
+    normalized.startsWith("store-") ||
+    normalized.startsWith("delete-") ||
+    normalized.startsWith("clear-")
+  ) {
+    return "Write";
+  }
+  if (normalized.startsWith("click:") || normalized.startsWith("input:")) {
+    return "Interaction";
+  }
+  if (normalized.startsWith("tab:")) {
+    return "Navigation";
+  }
+  if (normalized.startsWith("key:")) {
+    return "Interaction";
+  }
+  if (
+    normalized.startsWith("favorite:") ||
+    normalized.startsWith("importer-favorite:") ||
+    normalized.includes("favorite")
+  ) {
+    return "Engagement";
+  }
+  return "Interaction";
+}
+
+function buildFeatureDefinitions() {
+  const actionDefinitions = Object.keys(ACTION_TO_TOOL).map((actionKey) => {
+    const normalized = String(actionKey).toLowerCase();
+    const mappedTool = ACTION_TO_TOOL[normalized] || "unknown";
+    return {
+      kind: "action",
+      key: normalized,
+      label: ACTION_LABEL_OVERRIDES[normalized] || humanizeFeatureKey(normalized),
+      category: inferFeatureCategory(normalized),
+      tool: mappedTool,
+      source: "plugin-action",
+    };
+  });
+
+  const eventDefinitions = FEATURE_EVENT_DEFINITIONS.map((entry) => ({
+    kind: "event",
+    key: String(entry.key),
+    label: entry.label,
+    category: entry.category,
+    tool: entry.tool,
+    source: entry.source,
+  }));
+
+  const all = actionDefinitions.concat(eventDefinitions);
+  const deduped = new Map();
+  for (const row of all) {
+    const dedupeKey = `${row.kind}:${row.key}`;
+    if (!deduped.has(dedupeKey)) {
+      deduped.set(dedupeKey, row);
+    }
+  }
+  return Array.from(deduped.values());
+}
 
 const DASHBOARD_DEFAULT_EVENTS = new Set([
   "plugin_session_started",
@@ -1126,6 +1405,7 @@ function resolveNestedPayload(event) {
 
 async function fetchFeatureAnalytics(eventsCollection, match, options = {}) {
   const limit = parseLimit(options.limit, 150000, 250000);
+  const catalogLimit = parseLimit(options.catalogLimit, 600, 2400);
   const cursor = eventsCollection
     .find(match)
     .project({
@@ -1135,6 +1415,7 @@ async function fetchFeatureAnalytics(eventsCollection, match, options = {}) {
       tool: 1,
       payload: 1,
       sessionId: 1,
+      user: 1,
     })
     .sort({ eventAt: 1 })
     .limit(limit);
@@ -1158,6 +1439,31 @@ async function fetchFeatureAnalytics(eventsCollection, match, options = {}) {
   let mergedPdfGroups = 0;
   let mergedPagesTotal = 0;
   let maxPagesPerMerge = 0;
+  const featureDefinitions = buildFeatureDefinitions();
+  const definitionByCompositeKey = new Map(
+    featureDefinitions.map((item) => [`${item.kind}:${item.key}`, item])
+  );
+  const featureStats = new Map();
+
+  function ensureFeatureStat(kind, key, defaults = {}) {
+    const compositeKey = `${kind}:${key}`;
+    if (!featureStats.has(compositeKey)) {
+      featureStats.set(compositeKey, {
+        kind,
+        key,
+        label: defaults.label || humanizeFeatureKey(key),
+        category: defaults.category || inferFeatureCategory(key),
+        tool: defaults.tool || "unknown",
+        source: defaults.source || "runtime-observed",
+        count: 0,
+        sessionSet: new Set(),
+        authUserSet: new Set(),
+        anonymousUserSet: new Set(),
+        lastSeen: null,
+      });
+    }
+    return featureStats.get(compositeKey);
+  }
 
   for await (const event of cursor) {
     const payload =
@@ -1168,6 +1474,53 @@ async function fetchFeatureAnalytics(eventsCollection, match, options = {}) {
     const action = resolveEventAction(event);
     const normalizedAction = String(action || "").toLowerCase();
     const eventType = String(event && event.eventType ? event.eventType : "");
+    const sessionId = safeString(event && event.sessionId, 160);
+    const user = event && event.user && typeof event.user === "object" ? event.user : {};
+    const userId = user && user.isAuthenticated ? safeString(user.userId, 160) : null;
+    const anonymousId = !userId ? safeString(user.anonymousId, 160) : null;
+
+    if (normalizedAction) {
+      const actionCompositeKey = `action:${normalizedAction}`;
+      const actionDefinition =
+        definitionByCompositeKey.get(actionCompositeKey) || null;
+      const actionStat = ensureFeatureStat("action", normalizedAction, {
+        label:
+          (actionDefinition && actionDefinition.label) ||
+          ACTION_LABEL_OVERRIDES[normalizedAction] ||
+          humanizeFeatureKey(normalizedAction),
+        category:
+          (actionDefinition && actionDefinition.category) ||
+          inferFeatureCategory(normalizedAction),
+        tool:
+          (actionDefinition && actionDefinition.tool) ||
+          inferToolFromAction(normalizedAction) ||
+          normalizeToolId(event && event.tool) ||
+          "unknown",
+        source: (actionDefinition && actionDefinition.source) || "runtime-observed",
+      });
+
+      actionStat.count += 1;
+      if (sessionId) actionStat.sessionSet.add(sessionId);
+      if (userId) actionStat.authUserSet.add(userId);
+      if (anonymousId) actionStat.anonymousUserSet.add(anonymousId);
+      actionStat.lastSeen = event && event.eventAt ? event.eventAt : actionStat.lastSeen;
+    }
+
+    const eventCompositeKey = `event:${eventType}`;
+    if (definitionByCompositeKey.has(eventCompositeKey)) {
+      const eventDefinition = definitionByCompositeKey.get(eventCompositeKey);
+      const eventStat = ensureFeatureStat("event", eventType, {
+        label: eventDefinition.label,
+        category: eventDefinition.category,
+        tool: eventDefinition.tool || normalizeToolId(event && event.tool) || "unknown",
+        source: eventDefinition.source,
+      });
+      eventStat.count += 1;
+      if (sessionId) eventStat.sessionSet.add(sessionId);
+      if (userId) eventStat.authUserSet.add(userId);
+      if (anonymousId) eventStat.anonymousUserSet.add(anonymousId);
+      eventStat.lastSeen = event && event.eventAt ? event.eventAt : eventStat.lastSeen;
+    }
 
     if (eventType === "tool_time_spent") {
       const durationMs = toFiniteNumber(payload.durationMs || nestedPayload.durationMs, 0);
@@ -1330,6 +1683,72 @@ async function fetchFeatureAnalytics(eventsCollection, match, options = {}) {
     .filter((row) => Number.isFinite(row.pages))
     .sort((a, b) => a.pages - b.pages);
 
+  const featureCatalogRows = [];
+
+  for (const definition of featureDefinitions) {
+    const compositeKey = `${definition.kind}:${definition.key}`;
+    const stat = featureStats.get(compositeKey);
+    const count = stat ? toFiniteNumber(stat.count, 0) : 0;
+    const sessionCount = stat ? stat.sessionSet.size : 0;
+    const authenticatedUsers = stat ? stat.authUserSet.size : 0;
+    const anonymousUsers = stat ? stat.anonymousUserSet.size : 0;
+    const userCount = authenticatedUsers + anonymousUsers;
+    featureCatalogRows.push({
+      kind: definition.kind,
+      key: definition.key,
+      label: definition.label,
+      category: definition.category,
+      tool: definition.tool,
+      source: definition.source,
+      count,
+      sessionCount,
+      authenticatedUsers,
+      anonymousUsers,
+      userCount,
+      lastSeen: stat && stat.lastSeen ? stat.lastSeen : null,
+      status: count > 0 ? "active" : "inactive",
+    });
+  }
+
+  for (const stat of featureStats.values()) {
+    const compositeKey = `${stat.kind}:${stat.key}`;
+    if (definitionByCompositeKey.has(compositeKey)) continue;
+    const authenticatedUsers = stat.authUserSet.size;
+    const anonymousUsers = stat.anonymousUserSet.size;
+    featureCatalogRows.push({
+      kind: stat.kind,
+      key: stat.key,
+      label: stat.label || humanizeFeatureKey(stat.key),
+      category: stat.category || inferFeatureCategory(stat.key),
+      tool: stat.tool || "unknown",
+      source: stat.source || "runtime-observed",
+      count: toFiniteNumber(stat.count, 0),
+      sessionCount: stat.sessionSet.size,
+      authenticatedUsers,
+      anonymousUsers,
+      userCount: authenticatedUsers + anonymousUsers,
+      lastSeen: stat.lastSeen || null,
+      status: toFiniteNumber(stat.count, 0) > 0 ? "active" : "inactive",
+    });
+  }
+
+  featureCatalogRows.sort((a, b) => {
+    const countDiff = toFiniteNumber(b.count, 0) - toFiniteNumber(a.count, 0);
+    if (countDiff !== 0) return countDiff;
+    return String(a.label || "").localeCompare(String(b.label || ""));
+  });
+
+  const activeFeatureCount = featureCatalogRows.filter(
+    (item) => item.status === "active"
+  ).length;
+  const trackableFeatureCount = featureDefinitions.length;
+  const featureCoverageRate =
+    trackableFeatureCount > 0
+      ? Number((activeFeatureCount / trackableFeatureCount).toFixed(4))
+      : 0;
+  const topFeature = featureCatalogRows.find((item) => item.count > 0) || null;
+  const limitedFeatureCatalogRows = featureCatalogRows.slice(0, catalogLimit);
+
   return {
     kpis: {
       paletteExportEvents: paletteRows.reduce((sum, row) => sum + row.count, 0),
@@ -1347,6 +1766,10 @@ async function fetchFeatureAnalytics(eventsCollection, match, options = {}) {
       avgPagesPerMerge:
         mergedPdfGroups > 0 ? Number((mergedPagesTotal / mergedPdfGroups).toFixed(2)) : 0,
       maxPagesPerMerge,
+      activeFeatureCount,
+      trackableFeatureCount,
+      featureCoverageRate,
+      topFeature,
     },
     paletteExports: paletteRows,
     favoritedTools: favoriteRows,
@@ -1368,6 +1791,7 @@ async function fetchFeatureAnalytics(eventsCollection, match, options = {}) {
     compressionBreakdown: compressionRows,
     colorModeBreakdown: colorModeRows,
     mergeDistribution: mergeDistributionRows,
+    featureCatalog: limitedFeatureCatalogRows,
   };
 }
 
@@ -1522,8 +1946,10 @@ app.get("/api/plugin-analytics/features", async (req, res) => {
     const eventsCollection = await getEventsCollection();
     const { match, from, to } = buildMatch(req.query);
     const featureLimit = parseLimit(req.query.featureLimit, 120000, 250000);
+    const featureCatalogLimit = parseLimit(req.query.featureCatalogLimit, 600, 2400);
     const features = await fetchFeatureAnalytics(eventsCollection, match, {
       limit: featureLimit,
+      catalogLimit: featureCatalogLimit,
     });
     return res.json({ from, to, ...features });
   } catch (error) {
