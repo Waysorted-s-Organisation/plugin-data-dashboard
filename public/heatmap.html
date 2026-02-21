@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Plugin Analytics Overview</title>
+    <title>Heatmap Lab</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -11,22 +11,21 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/styles.css" />
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   </head>
   <body>
     <header class="page-header">
       <div>
         <p class="eyebrow">Plugin Analytics</p>
-        <h1>Overview</h1>
+        <h1>Heatmap Lab</h1>
         <p class="subtitle">
-          Real-time product intelligence for user behavior, tool engagement, and session quality.
+          High-resolution click density with tool/action filters and top interaction targets.
         </p>
       </div>
       <div class="header-actions">
         <nav class="top-nav">
-          <a class="nav-link active" href="/">Overview</a>
+          <a class="nav-link" href="/">Overview</a>
           <a class="nav-link" href="/features.html">Feature Intelligence</a>
-          <a class="nav-link" href="/heatmap.html">Heatmap Lab</a>
+          <a class="nav-link active" href="/heatmap.html">Heatmap Lab</a>
         </nav>
         <button id="refreshBtn" class="primary-btn">Refresh</button>
       </div>
@@ -70,102 +69,37 @@
           <option value="all">All actions</option>
         </select>
       </label>
-      <label class="checkbox-label">
-        Focus mode
-        <span class="checkbox-row">
-          <input id="showSystemEvents" type="checkbox" />
-          <span>Include system events</span>
-        </span>
-      </label>
-    </section>
-
-    <section id="kpiGrid" class="kpi-grid"></section>
-    <section id="insightsGrid" class="insights-grid"></section>
-
-    <section class="card-grid two-up">
-      <article class="card">
-        <h2>Top Tools (Meaningful Activity)</h2>
-        <div class="chart-wrap">
-          <canvas id="toolChart"></canvas>
-        </div>
-      </article>
-      <article class="card">
-        <h2>Activity Trend by Day</h2>
-        <div class="chart-wrap">
-          <canvas id="dailyChart"></canvas>
-        </div>
-      </article>
     </section>
 
     <section class="card-grid two-up">
       <article class="card">
         <div class="card-title-row">
-          <h2>Click Heatmap (Overview)</h2>
-          <span id="heatmapCount" class="muted"></span>
+          <h2>Density Heatmap</h2>
+          <span id="heatmapMeta" class="muted">-</span>
         </div>
-        <div class="heatmap-wrap">
+        <div class="heatmap-wrap heatmap-lab-wrap">
           <canvas id="heatmapCanvas"></canvas>
         </div>
       </article>
       <article class="card">
-        <h2>Action Intelligence</h2>
+        <h2>Top Click Targets</h2>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Event</th>
-                <th>Meaning</th>
-                <th>Category</th>
-                <th>Count</th>
-                <th>Share</th>
+                <th>Target</th>
+                <th>Tool</th>
+                <th>Clicks</th>
               </tr>
             </thead>
-            <tbody id="actionsBody"></tbody>
+            <tbody id="targetsBody"></tbody>
           </table>
         </div>
       </article>
     </section>
 
-    <section class="card">
-      <h2>Session Quality</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Session</th>
-              <th>User</th>
-              <th>Duration</th>
-              <th>Active Actions</th>
-              <th>Tools Used</th>
-              <th>Last Seen</th>
-            </tr>
-          </thead>
-          <tbody id="sessionsBody"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>Recent Event Timeline</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>What Happened</th>
-              <th>Tool</th>
-              <th>Value Signal</th>
-              <th>User</th>
-              <th>Session</th>
-            </tr>
-          </thead>
-          <tbody id="eventsBody"></tbody>
-        </table>
-      </div>
-    </section>
-
     <p id="statusLine" class="status">Loading…</p>
 
-    <script type="module" src="/app.js"></script>
+    <script type="module" src="/heatmap.js"></script>
   </body>
 </html>

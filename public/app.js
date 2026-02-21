@@ -192,6 +192,60 @@ const EVENT_METADATA = {
     category: "System",
     signal: "low",
   },
+  palette_export_performed: {
+    label: "Palette Export",
+    description: "Palette variation or scheme export was executed.",
+    category: "Palette",
+    signal: "high",
+  },
+  tool_favorite_changed: {
+    label: "Tool Favorite Changed",
+    description: "User added or removed a tool from favorites.",
+    category: "Engagement",
+    signal: "high",
+  },
+  importer_favorite_changed: {
+    label: "Importer Favorite Changed",
+    description: "User updated importer favorites in import tool.",
+    category: "Engagement",
+    signal: "high",
+  },
+  import_file_selected: {
+    label: "Import File Selected",
+    description: "User selected a file for import workflow.",
+    category: "Import",
+    signal: "high",
+  },
+  import_conversion_completed: {
+    label: "Import Conversion Completed",
+    description: "File conversion completed before Figma import.",
+    category: "Import",
+    signal: "high",
+  },
+  pdf_export_requested: {
+    label: "PDF Export Requested",
+    description: "Export started with DPI/compression/password settings.",
+    category: "Export",
+    signal: "high",
+  },
+  pdf_merge_group_exported: {
+    label: "Merged PDF Created",
+    description: "A merged PDF group was generated.",
+    category: "Export",
+    signal: "high",
+  },
+  pdf_individual_exported: {
+    label: "Individual PDF Created",
+    description: "A single frame PDF was generated.",
+    category: "Export",
+    signal: "high",
+  },
+  pdf_export_completed: {
+    label: "PDF Export Completed",
+    description: "ZIP/PDF export pipeline completed successfully.",
+    category: "Export",
+    signal: "high",
+  },
   unknown_event: {
     label: "Unknown Event",
     description: "Event not yet explicitly cataloged.",
@@ -229,6 +283,12 @@ const ACTION_METADATA = {
     label: "Toggle Import Tool",
     description: "Open/close import tool panel.",
     category: "Navigation",
+    signal: "high",
+  },
+  "toggle-favorite": {
+    label: "Toggle Favorite",
+    description: "Mark or unmark importer/tool as favorite.",
+    category: "Engagement",
     signal: "high",
   },
   "toggle-unit-converter": {
@@ -570,6 +630,13 @@ let currentLoadToken = 0
 let realtimeRefreshTimer = null
 let lastRenderFingerprint = ""
 const REALTIME_REFRESH_MS = 8000
+let latestHeatmapPayload = null
+let heatmapResizeObserver = null
+
+if (typeof window !== "undefined" && window.Chart) {
+  window.Chart.defaults.color = "#a9b7e5"
+  window.Chart.defaults.borderColor = "rgba(159, 183, 255, 0.18)"
+}
 
 function escapeHtml(value) {
   const text = String(value === null || value === undefined ? "" : value)
@@ -741,6 +808,106 @@ function inferActionMeta(actionKey) {
     }
   }
 
+  if (normalized.startsWith("palette:export-scheme:")) {
+    const scheme = key.split(":").slice(3).join(":")
+    return {
+      key,
+      label: `Export Scheme: ${humanizeIdentifier(scheme)}`,
+      description: "Palette scheme exported from palette tool.",
+      category: "Palette",
+      signal: "high",
+      passive: false,
+    }
+  }
+
+  if (normalized.startsWith("palette:export-variation:")) {
+    const mode = key.split(":").slice(3).join(":")
+    return {
+      key,
+      label: `Export Variation: ${humanizeIdentifier(mode)}`,
+      description: "Palette variation exported from palette tool.",
+      category: "Palette",
+      signal: "high",
+      passive: false,
+    }
+  }
+
+  if (normalized === "palette:export-selected-options") {
+    return {
+      key,
+      label: "Export Selected Palette Options",
+      description: "Batch export of selected palette variation/scheme options.",
+      category: "Palette",
+      signal: "high",
+      passive: false,
+    }
+  }
+
+  if (normalized.startsWith("favorite:")) {
+    const action = normalized.endsWith(":add") ? "Add Favorite" : normalized.endsWith(":remove") ? "Remove Favorite" : "Favorite Updated"
+    return {
+      key,
+      label: action,
+      description: "Favorite preference changed in dashboard tools.",
+      category: "Engagement",
+      signal: "high",
+      passive: false,
+    }
+  }
+
+  if (normalized.startsWith("importer-favorite:")) {
+    const action =
+      normalized.endsWith(":add")
+        ? "Add Importer Favorite"
+        : normalized.endsWith(":remove")
+          ? "Remove Importer Favorite"
+          : "Importer Favorite Updated"
+    return {
+      key,
+      label: action,
+      description: "Favorite preference changed in import tool.",
+      category: "Engagement",
+      signal: "high",
+      passive: false,
+    }
+  }
+
+  if (normalized.startsWith("import:conversion:")) {
+    const importer = key.split(":").slice(2).join(":")
+    return {
+      key,
+      label: `Import Conversion: ${humanizeIdentifier(importer)}`,
+      description: "Pre-import conversion completed for selected file.",
+      category: "Import",
+      signal: "high",
+      passive: false,
+    }
+  }
+
+  if (normalized.startsWith("import:file-selected:")) {
+    const importer = key.split(":").slice(2).join(":")
+    return {
+      key,
+      label: `Import Selected: ${humanizeIdentifier(importer)}`,
+      description: "User selected import file for processing.",
+      category: "Import",
+      signal: "high",
+      passive: false,
+    }
+  }
+
+  if (normalized.startsWith("export:pdf:")) {
+    const phase = key.split(":").slice(2).join(":")
+    return {
+      key,
+      label: `PDF Export ${humanizeIdentifier(phase)}`,
+      description: "PDF export workflow lifecycle event.",
+      category: "Export",
+      signal: "high",
+      passive: false,
+    }
+  }
+
   let category = "Custom"
   let signal = "medium"
   let passive = false
@@ -832,6 +999,56 @@ function eventDetailText(event, meta) {
 
   if (meta.key === "tool_time_spent") {
     return `Time tracked: ${durationLabel(payload.durationMs)} in ${labelTool(event.tool)}`
+  }
+
+  if (meta.key === "palette_export_performed") {
+    const exportType = payload.exportType ? humanizeIdentifier(payload.exportType) : "Palette"
+    const mode = payload.mode ? ` (${humanizeIdentifier(payload.mode)})` : ""
+    const count = Number(payload.colorCount || payload.optionCount || 0)
+    return `${exportType} export${mode}${count > 0 ? ` • ${count} values` : ""}`
+  }
+
+  if (meta.key === "tool_favorite_changed" || meta.key === "importer_favorite_changed") {
+    const target = payload.toolLabel || payload.toolId || payload.importerId || "tool"
+    const state = payload.isFavorited === true ? "added to favorites" : "removed from favorites"
+    return `${humanizeIdentifier(target)} ${state}`
+  }
+
+  if (meta.key === "import_file_selected") {
+    const importer = payload.importer ? humanizeIdentifier(payload.importer) : "Importer"
+    const bucket = payload.fileSizeBucket ? ` • ${payload.fileSizeBucket}` : ""
+    return `${importer} file selected${bucket}`
+  }
+
+  if (meta.key === "import_conversion_completed") {
+    const importer = payload.importer ? humanizeIdentifier(payload.importer) : "Importer"
+    const bucket = payload.outputSizeBucket ? ` • ${payload.outputSizeBucket}` : ""
+    return `${importer} conversion completed${bucket}`
+  }
+
+  if (meta.key === "pdf_export_requested") {
+    const dpi = Number(payload.dpi || 0)
+    const compression = payload.compression ? humanizeIdentifier(payload.compression) : "Unknown"
+    const colorMode = payload.colorMode ? String(payload.colorMode).toUpperCase() : "Unknown"
+    const passwordState = payload.passwordEnabled ? "password protected" : "no password"
+    return `Export requested • ${dpi || "?"} DPI • ${compression} • ${colorMode} • ${passwordState}`
+  }
+
+  if (meta.key === "pdf_merge_group_exported") {
+    const pages = Number(payload.pageCount || 0)
+    const name = payload.groupName ? humanizeIdentifier(payload.groupName) : "Merged group"
+    return `${name} exported • ${pages} pages`
+  }
+
+  if (meta.key === "pdf_individual_exported") {
+    const frameName = payload.frameName ? humanizeIdentifier(payload.frameName) : "Frame"
+    return `${frameName} exported as individual PDF`
+  }
+
+  if (meta.key === "pdf_export_completed") {
+    const count = Number(payload.outputPdfCount || 0)
+    const zipBucket = payload.zipSizeBucket || payload.totalPdfSizeBucket || "unknown"
+    return `Export completed • ${count} PDFs • ${zipBucket} output`
   }
 
   if (meta.key === "session_heartbeat") {
@@ -970,6 +1187,11 @@ function buildDerivedAnalysis(dashboard) {
   const topToolShare = topTool && meaningfulEvents > 0
     ? topTool.activeEventCount / meaningfulEvents
     : 0
+  const activeToolCount = sortedTools.filter((toolRow) => toolRow.activeEventCount > 0).length
+  const authenticatedUsers = Number(kpis.authenticatedUsers || 0)
+  const anonymousUsers = Number(kpis.anonymousUsers || 0)
+  const totalUsers = authenticatedUsers + anonymousUsers
+  const authenticatedShare = totalUsers > 0 ? authenticatedUsers / totalUsers : 0
 
   return {
     totalEvents,
@@ -983,7 +1205,10 @@ function buildDerivedAnalysis(dashboard) {
     topMeaningfulEvent,
     topTool,
     topToolShare,
-    anonymousUsers: Number(kpis.anonymousUsers || 0),
+    activeToolCount,
+    authenticatedUsers,
+    anonymousUsers,
+    authenticatedShare,
   }
 }
 
@@ -1042,6 +1267,11 @@ function renderKpis(kpis, analysis) {
       sub: `${numberLabel(kpis.authenticatedUsers)} auth • ${numberLabel(kpis.anonymousUsers)} identified anonymous`,
     },
     {
+      label: "Active Tools",
+      value: numberLabel(analysis.activeToolCount),
+      sub: analysis.topTool ? `Top: ${labelTool(analysis.topTool.tool)}` : "Top: -",
+    },
+    {
       label: "Active Actions / Session",
       value: analysis.avgMeaningfulPerSession.toFixed(1),
       sub: "Intent depth",
@@ -1050,6 +1280,23 @@ function renderKpis(kpis, analysis) {
       label: "Avg Session Time",
       value: durationLabel(kpis.avgSessionDurationMs),
       sub: `Max ${durationLabel(kpis.maxSessionDurationMs)}`,
+    },
+    {
+      label: "Clicks",
+      value: numberLabel(analysis.clickCount),
+      sub: `${analysis.clickPerSession.toFixed(2)} per session`,
+    },
+    {
+      label: "Authenticated Share",
+      value: percentLabel(analysis.authenticatedShare),
+      sub: `${numberLabel(analysis.authenticatedUsers)} authenticated users`,
+      tone: analysis.authenticatedShare > 0.2 ? "good" : "neutral",
+    },
+    {
+      label: "Top Tool Concentration",
+      value: percentLabel(analysis.topToolShare),
+      sub: "Meaningful actions from #1 workflow",
+      tone: analysis.topToolShare > 0.6 ? "warn" : "neutral",
     },
   ]
 
@@ -1203,7 +1450,7 @@ function renderRecentEvents(events) {
   }
 
   eventsBody.innerHTML = rows
-    .slice(0, 180)
+    .slice(0, 120)
     .map((event) => {
       const user = labelUser(event.user)
       const sessionId = String(event.sessionId || "unknown-session")
@@ -1272,8 +1519,15 @@ function renderToolChart(tools) {
           legend: { display: false },
         },
         scales: {
-          x: { ticks: { maxRotation: 18, minRotation: 18 } },
-          y: { beginAtZero: true },
+          x: {
+            ticks: { maxRotation: 18, minRotation: 18, color: "#9db0e7" },
+            grid: { color: "rgba(159, 183, 255, 0.12)" },
+          },
+          y: {
+            beginAtZero: true,
+            ticks: { color: "#9db0e7" },
+            grid: { color: "rgba(159, 183, 255, 0.12)" },
+          },
         },
       },
     })
@@ -1319,8 +1573,21 @@ function renderDailyChart(points) {
       options: {
         maintainAspectRatio: false,
         animation: false,
+        plugins: {
+          legend: {
+            labels: { color: "#a9b7e5" },
+          },
+        },
         scales: {
-          y: { beginAtZero: true },
+          x: {
+            ticks: { color: "#9db0e7" },
+            grid: { color: "rgba(159, 183, 255, 0.08)" },
+          },
+          y: {
+            beginAtZero: true,
+            ticks: { color: "#9db0e7" },
+            grid: { color: "rgba(159, 183, 255, 0.12)" },
+          },
         },
       },
     })
@@ -1333,13 +1600,36 @@ function renderDailyChart(points) {
   dailyChart.update("none")
 }
 
-function drawHeatmap(heatmap) {
+function ensureHeatmapCanvasSize(minHeight = 260) {
+  const parent = heatmapCanvas && heatmapCanvas.parentElement
+  const rect = parent ? parent.getBoundingClientRect() : null
+  const cssWidth = Math.max(220, Math.floor((rect && rect.width) || heatmapCanvas.clientWidth || 220))
+  const cssHeight = Math.max(
+    minHeight,
+    Math.floor((rect && rect.height) || heatmapCanvas.clientHeight || minHeight)
+  )
+  const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1))
+  const nextWidth = Math.floor(cssWidth * dpr)
+  const nextHeight = Math.floor(cssHeight * dpr)
+
+  if (heatmapCanvas.width !== nextWidth || heatmapCanvas.height !== nextHeight) {
+    heatmapCanvas.width = nextWidth
+    heatmapCanvas.height = nextHeight
+  }
+  heatmapCanvas.style.width = `${cssWidth}px`
+  heatmapCanvas.style.height = `${cssHeight}px`
+
   const ctx = heatmapCanvas.getContext("2d")
-  const width = heatmapCanvas.width
-  const height = heatmapCanvas.height
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  return { ctx, width: cssWidth, height: cssHeight }
+}
+
+function drawHeatmap(heatmap) {
+  latestHeatmapPayload = heatmap || {}
+  const { ctx, width, height } = ensureHeatmapCanvasSize(260)
 
   ctx.clearRect(0, 0, width, height)
-  ctx.fillStyle = "#f8fbff"
+  ctx.fillStyle = "#0d1428"
   ctx.fillRect(0, 0, width, height)
 
   const isCompact = Boolean(heatmap && heatmap.compact)
@@ -1351,9 +1641,9 @@ function drawHeatmap(heatmap) {
     const totalPoints = Number(heatmap.totalPoints || 0)
 
     if (!bins.length || maxCount <= 0) {
-      ctx.fillStyle = "#5c6f98"
-      ctx.font = "14px Manrope"
-      ctx.fillText("No click data for this range.", 20, 28)
+      ctx.fillStyle = "#9aa8d4"
+      ctx.font = "500 13px 'Space Grotesk'"
+      ctx.fillText("No click data for this range.", 18, 26)
       heatmapCount.textContent = "0 points"
       return
     }
@@ -1364,8 +1654,9 @@ function drawHeatmap(heatmap) {
     for (const bin of bins) {
       const intensity = Math.min(1, Number(bin.count || 0) / maxCount)
       if (intensity <= 0) continue
-
-      ctx.fillStyle = `rgba(255, 87, 34, ${0.08 + intensity * 0.52})`
+      const hue = 34 - intensity * 26
+      const alpha = 0.1 + intensity * 0.66
+      ctx.fillStyle = `hsla(${hue}, 100%, 58%, ${alpha})`
       ctx.fillRect(
         Math.floor(Number(bin.x || 0) * cellWidth),
         Math.floor(Number(bin.y || 0) * cellHeight),
@@ -1374,14 +1665,21 @@ function drawHeatmap(heatmap) {
       )
     }
 
-    ctx.strokeStyle = "rgba(25, 104, 255, 0.11)"
-    for (let x = 0; x <= width; x += 103) {
+    ctx.strokeStyle = "rgba(159, 183, 255, 0.14)"
+    ctx.lineWidth = 1
+    const columns = Math.max(8, Math.min(20, Math.floor(width / 72)))
+    const rows = Math.max(4, Math.min(12, Math.floor(height / 36)))
+    const stepX = width / columns
+    const stepY = height / rows
+    for (let i = 1; i < columns; i += 1) {
+      const x = Math.floor(i * stepX) + 0.5
       ctx.beginPath()
       ctx.moveTo(x, 0)
       ctx.lineTo(x, height)
       ctx.stroke()
     }
-    for (let y = 0; y <= height; y += 40) {
+    for (let i = 1; i < rows; i += 1) {
+      const y = Math.floor(i * stepY) + 0.5
       ctx.beginPath()
       ctx.moveTo(0, y)
       ctx.lineTo(width, y)
@@ -1394,14 +1692,14 @@ function drawHeatmap(heatmap) {
 
   const points = Array.isArray(heatmap && heatmap.points) ? heatmap.points : []
   if (!points.length) {
-    ctx.fillStyle = "#5c6f98"
-    ctx.font = "14px Manrope"
-    ctx.fillText("No click data for this range.", 20, 28)
+    ctx.fillStyle = "#9aa8d4"
+    ctx.font = "500 13px 'Space Grotesk'"
+    ctx.fillText("No click data for this range.", 18, 26)
     heatmapCount.textContent = "0 points"
     return
   }
 
-  const sampled = points.slice(0, 1200)
+  const sampled = points.slice(0, 1400)
 
   sampled.forEach((point) => {
     const px = Number.isFinite(Number(point.normalizedX))
@@ -1413,13 +1711,13 @@ function drawHeatmap(heatmap) {
 
     if (!Number.isFinite(px) || !Number.isFinite(py)) return
 
-    const gradient = ctx.createRadialGradient(px, py, 2, px, py, 24)
-    gradient.addColorStop(0, "rgba(255, 87, 34, 0.24)")
-    gradient.addColorStop(1, "rgba(255, 87, 34, 0)")
-
+    const gradient = ctx.createRadialGradient(px, py, 1.5, px, py, 22)
+    gradient.addColorStop(0, "rgba(255, 208, 92, 0.24)")
+    gradient.addColorStop(0.65, "rgba(255, 112, 64, 0.2)")
+    gradient.addColorStop(1, "rgba(255, 112, 64, 0)")
     ctx.fillStyle = gradient
     ctx.beginPath()
-    ctx.arc(px, py, 24, 0, Math.PI * 2)
+    ctx.arc(px, py, 22, 0, Math.PI * 2)
     ctx.fill()
   })
 
@@ -1504,7 +1802,7 @@ async function loadDashboard(options = {}) {
   params.set("heatmapGridX", "96")
   params.set("heatmapGridY", "24")
   params.set("sessionsLimit", "80")
-  params.set("eventsLimit", "220")
+  params.set("eventsLimit", "140")
   const query = params.toString()
 
   if (!silent) {
@@ -1657,6 +1955,30 @@ function startRealtimeRefresh() {
   }, REALTIME_REFRESH_MS)
 }
 
+function bindHeatmapResize() {
+  if (!heatmapCanvas) return
+  if (heatmapResizeObserver) {
+    heatmapResizeObserver.disconnect()
+    heatmapResizeObserver = null
+  }
+
+  const redraw = () => {
+    if (!latestHeatmapPayload) return
+    drawHeatmap(latestHeatmapPayload)
+  }
+
+  if (typeof ResizeObserver !== "undefined") {
+    heatmapResizeObserver = new ResizeObserver(() => {
+      redraw()
+    })
+    if (heatmapCanvas.parentElement) {
+      heatmapResizeObserver.observe(heatmapCanvas.parentElement)
+    }
+  }
+
+  window.addEventListener("resize", redraw)
+}
+
 function init() {
   applyPreset("7d")
   authFilterEl.value = "all"
@@ -1665,6 +1987,7 @@ function init() {
   showSystemEventsEl.checked = false
   state.includeSystemEvents = false
   bindControls()
+  bindHeatmapResize()
   loadDashboard()
   startRealtimeRefresh()
 }
