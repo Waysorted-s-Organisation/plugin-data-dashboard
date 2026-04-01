@@ -27,22 +27,67 @@ const READ_PASS = (process.env.DASHBOARD_BASIC_AUTH_PASS || "").trim();
 let initializationPromise = null;
 let isInitialized = false;
 const PASSIVE_EVENT_TYPES = [
+  "plugin_session_started",
+  "plugin_session_ended",
   "session_heartbeat",
+  "plugin_message",
+  "backend_operation",
+  "auth_lifecycle",
+  "user_context_changed",
+  "tool_context_changed",
+  "tool_time_spent",
+  "ui_session_started",
   "ui_heartbeat",
   "ui_state_snapshot",
   "ui_visibility_change",
+  "ui_resize",
+  "ui_before_unload",
   "analytics_transport_updated",
 ];
 const PASSIVE_ACTION_KEYS = [
+  "backend_operation",
+  "plugin_session_started",
+  "plugin_session_ended",
+  "user_context_changed",
+  "tool_context_changed",
+  "tool_time_spent",
   "get-ui-state",
+  "get-all-frames",
+  "get-manual-selection-state",
+  "get-token",
+  "get-session",
+  "get-font",
   "notify",
   "ui-loaded",
+  "load-presets",
+  "load-liked-presets",
+  "load-comments",
   "set-analytics-endpoint",
   "analytics-event",
   "analytics-batch",
   "analytics-identify",
   "analytics-flush",
+  "check-session-start",
+  "cached-user-restored",
+  "cached-user-token-valid",
+  "cached-user-network-fallback",
+  "token-expired",
+  "token-validated",
+  "session-poll-restored-token",
+  "refresh-requested",
+  "refresh-succeeded",
+  "refresh-failed",
+  "background-validate-start",
+  "background-validate-succeeded",
+  "background-validate-auth-error",
+  "background-validate-refresh-failed",
+  "auth-data-cleared",
+  "start-auth-no-active-session",
+  "token-invalid-refresh-attempt",
+  "token-refresh-recovered",
 ];
+const PASSIVE_EVENT_TYPE_SET = new Set(PASSIVE_EVENT_TYPES);
+const PASSIVE_ACTION_KEY_SET = new Set(PASSIVE_ACTION_KEYS);
 const MAX_EVENT_TYPE_BREAKDOWN = 40;
 
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -174,10 +219,16 @@ const TOOL_ALIASES = {
   "palette-tool": "palettable",
   "frame-gallery": "frame-gallery",
   frame_gallery: "frame-gallery",
+  "frames-to-pdf": "frame-gallery",
+  frames_to_pdf: "frame-gallery",
   "import-tool": "import-tool",
   import_tool: "import-tool",
   "unit-converter": "unit-converter",
   unit_converter: "unit-converter",
+  "html-to-design": "html-to-design",
+  html_to_design: "html-to-design",
+  "comment-summarizer": "comment-summarizer",
+  comment_summarizer: "comment-summarizer",
   profile: "profile",
   "wayfall-game": "wayfall-game",
   game: "wayfall-game",
@@ -218,6 +269,14 @@ const ACTION_TO_TOOL = {
   "save-liked-presets": "unit-converter",
   "convert-units": "unit-converter",
   "export-frame": "unit-converter",
+  "toggle-html-to-design": "html-to-design",
+  "import-html-design-layers": "html-to-design",
+  "toggle-comment-summarizer": "comment-summarizer",
+  "open-comment-summary": "comment-summarizer",
+  "load-comments": "comment-summarizer",
+  "run-summarization": "comment-summarizer",
+  "start-new-summary": "comment-summarizer",
+  "show-comment-summarizer-tutorial": "comment-summarizer",
   "toggle-profile": "profile",
   "avatar-selected": "profile",
   "store-avatar": "profile",
@@ -335,17 +394,25 @@ const FEATURE_EVENT_DEFINITIONS = [
 
 const ACTION_LABEL_OVERRIDES = {
   "toggle-palette": "Toggle Palette Tool",
-  "toggle-frame-gallery": "Toggle Frame Gallery",
+  "toggle-frame-gallery": "Toggle Frames to PDF",
   "toggle-import-tool": "Toggle Import Tool",
   "toggle-unit-converter": "Toggle Unit Converter",
+  "toggle-html-to-design": "Toggle HTML to Design",
+  "import-html-design-layers": "Import HTML Design Layers",
+  "toggle-comment-summarizer": "Toggle Comment Summarizer",
+  "open-comment-summary": "Open Comment Summary",
+  "load-comments": "Load Comments",
+  "run-summarization": "Run Summarization",
+  "start-new-summary": "Start New Summary",
+  "show-comment-summarizer-tutorial": "Show Comment Summarizer Tutorial",
   "toggle-profile": "Toggle Profile",
   "toggle-game": "Toggle Wayfall Game",
   "toggle-liquid-glass": "Toggle Liquid Glass",
   "toggle-manual-selection": "Toggle Manual Selection",
   "clear-manual-selection": "Clear Manual Selection",
   "get-manual-selection-state": "Get Manual Selection State",
-  "get-all-frames": "Get All Frames",
-  "export-frames-with-dpi": "Export Frames With DPI",
+  "get-all-frames": "Load Frames to PDF",
+  "export-frames-with-dpi": "Preview Frames at DPI",
   "export-zip-with-password": "Export ZIP With Password",
   "export-palette": "Export Palette",
   "export-color-schemes": "Export Color Schemes",
@@ -402,6 +469,9 @@ function humanizeFeatureKey(value) {
 function inferFeatureCategory(key) {
   const normalized = String(key || "").toLowerCase();
   if (!normalized) return "Custom";
+  if (normalized.includes("comment") || normalized.includes("summary")) {
+    return "Comment Summarizer";
+  }
   if (normalized.startsWith("toggle-") || normalized.includes("collapsed")) {
     return "Navigation";
   }
@@ -427,6 +497,9 @@ function inferFeatureCategory(key) {
     return "Palette";
   }
   if (normalized.includes("import") || normalized.includes("font")) {
+    return "Import";
+  }
+  if (normalized.includes("html") && normalized.includes("design")) {
     return "Import";
   }
   if (normalized.includes("frame") || normalized.includes("manual-selection")) {
@@ -485,8 +558,24 @@ function inferFeatureCategory(key) {
   return "Interaction";
 }
 
+function isPassiveActionKey(actionKey) {
+  const normalized = String(actionKey || "").trim().toLowerCase();
+  if (!normalized) return false;
+  if (PASSIVE_ACTION_KEY_SET.has(normalized)) return true;
+  if (normalized.startsWith("analytics-")) return true;
+  return false;
+}
+
+function isPassiveEventType(eventType) {
+  const normalized = String(eventType || "").trim();
+  if (!normalized) return false;
+  return PASSIVE_EVENT_TYPE_SET.has(normalized);
+}
+
 function buildFeatureDefinitions() {
-  const actionDefinitions = Object.keys(ACTION_TO_TOOL).map((actionKey) => {
+  const actionDefinitions = Object.keys(ACTION_TO_TOOL)
+    .filter((actionKey) => !isPassiveActionKey(actionKey))
+    .map((actionKey) => {
     const normalized = String(actionKey).toLowerCase();
     const mappedTool = ACTION_TO_TOOL[normalized] || "unknown";
     return {
@@ -1478,8 +1567,10 @@ async function fetchFeatureAnalytics(eventsCollection, match, options = {}) {
     const user = event && event.user && typeof event.user === "object" ? event.user : {};
     const userId = user && user.isAuthenticated ? safeString(user.userId, 160) : null;
     const anonymousId = !userId ? safeString(user.anonymousId, 160) : null;
+    const passiveAction = isPassiveActionKey(normalizedAction);
+    const passiveEvent = isPassiveEventType(eventType);
 
-    if (normalizedAction) {
+    if (normalizedAction && !passiveAction) {
       const actionCompositeKey = `action:${normalizedAction}`;
       const actionDefinition =
         definitionByCompositeKey.get(actionCompositeKey) || null;
@@ -1507,7 +1598,7 @@ async function fetchFeatureAnalytics(eventsCollection, match, options = {}) {
     }
 
     const eventCompositeKey = `event:${eventType}`;
-    if (definitionByCompositeKey.has(eventCompositeKey)) {
+    if (!passiveEvent && definitionByCompositeKey.has(eventCompositeKey)) {
       const eventDefinition = definitionByCompositeKey.get(eventCompositeKey);
       const eventStat = ensureFeatureStat("event", eventType, {
         label: eventDefinition.label,
