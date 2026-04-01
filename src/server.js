@@ -45,6 +45,13 @@ const PASSIVE_EVENT_TYPES = [
   "analytics_transport_updated",
 ];
 const PASSIVE_ACTION_KEYS = [
+  "session_heartbeat",
+  "ui_session_started",
+  "ui_heartbeat",
+  "ui_state_snapshot",
+  "ui_visibility_change",
+  "ui_resize",
+  "ui_before_unload",
   "backend_operation",
   "plugin_session_started",
   "plugin_session_ended",
