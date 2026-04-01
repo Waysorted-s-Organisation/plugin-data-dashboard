@@ -26,6 +26,76 @@ const READ_USER = (process.env.DASHBOARD_BASIC_AUTH_USER || "").trim();
 const READ_PASS = (process.env.DASHBOARD_BASIC_AUTH_PASS || "").trim();
 let initializationPromise = null;
 let isInitialized = false;
+const PASSIVE_EVENT_TYPES = [
+  "plugin_session_started",
+  "plugin_session_ended",
+  "session_heartbeat",
+  "plugin_message",
+  "backend_operation",
+  "auth_lifecycle",
+  "user_context_changed",
+  "tool_context_changed",
+  "tool_time_spent",
+  "ui_session_started",
+  "ui_heartbeat",
+  "ui_state_snapshot",
+  "ui_visibility_change",
+  "ui_resize",
+  "ui_before_unload",
+  "analytics_transport_updated",
+];
+const PASSIVE_ACTION_KEYS = [
+  "session_heartbeat",
+  "ui_session_started",
+  "ui_heartbeat",
+  "ui_state_snapshot",
+  "ui_visibility_change",
+  "ui_resize",
+  "ui_before_unload",
+  "backend_operation",
+  "plugin_session_started",
+  "plugin_session_ended",
+  "user_context_changed",
+  "tool_context_changed",
+  "tool_time_spent",
+  "get-ui-state",
+  "get-all-frames",
+  "get-manual-selection-state",
+  "get-token",
+  "get-session",
+  "get-font",
+  "notify",
+  "ui-loaded",
+  "load-presets",
+  "load-liked-presets",
+  "load-comments",
+  "set-analytics-endpoint",
+  "analytics-event",
+  "analytics-batch",
+  "analytics-identify",
+  "analytics-flush",
+  "check-session-start",
+  "cached-user-restored",
+  "cached-user-token-valid",
+  "cached-user-network-fallback",
+  "token-expired",
+  "token-validated",
+  "session-poll-restored-token",
+  "refresh-requested",
+  "refresh-succeeded",
+  "refresh-failed",
+  "background-validate-start",
+  "background-validate-succeeded",
+  "background-validate-auth-error",
+  "background-validate-refresh-failed",
+  "auth-data-cleared",
+  "start-auth-no-active-session",
+  "token-invalid-refresh-attempt",
+  "token-refresh-recovered",
+];
+const PASSIVE_EVENT_TYPE_SET = new Set(PASSIVE_EVENT_TYPES);
+const PASSIVE_ACTION_KEY_SET = new Set(PASSIVE_ACTION_KEYS);
+const MAX_EVENT_TYPE_BREAKDOWN = 40;
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
@@ -79,27 +149,618 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function normalizeUser(user) {
+function addMatchClause(match, clause) {
+  if (!clause || typeof clause !== "object") return;
+  if (!match.$and) {
+    match.$and = [clause];
+    return;
+  }
+  match.$and.push(clause);
+}
+
+function parseActionFilter(value) {
+  const raw = safeString(value, 500);
+  if (!raw || raw === "all") return [];
+  const actions = raw
+    .split(",")
+    .map((item) => safeString(item, 120))
+    .filter(Boolean)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return Array.from(new Set(actions)).slice(0, 30);
+}
+
+function actionProjectionExpression() {
+  return {
+    $ifNull: [
+      "$payload.action",
+      {
+        $ifNull: [
+          "$payload.messageType",
+          {
+            $ifNull: [
+              "$payload.interactionAction",
+              {
+                $ifNull: ["$payload.type", "$eventType"],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function passiveEventExpression() {
+  const actionExpr = actionProjectionExpression();
+  return {
+    $or: [
+      { $in: ["$eventType", PASSIVE_EVENT_TYPES] },
+      { $in: [actionExpr, PASSIVE_ACTION_KEYS] },
+      {
+        $regexMatch: {
+          input: { $toLower: { $ifNull: [actionExpr, ""] } },
+          regex: "^analytics-",
+        },
+      },
+    ],
+  };
+}
+
+function stableHashId(input) {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash +=
+      (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return Math.abs(hash >>> 0).toString(36);
+}
+
+const TOOL_ALIASES = {
+  dashboard: "dashboard",
+  "collapsed-dashboard": "collapsed-dashboard",
+  collapsed_dashboard: "collapsed-dashboard",
+  palettable: "palettable",
+  palette: "palettable",
+  "palette-tool": "palettable",
+  "frame-gallery": "frame-gallery",
+  frame_gallery: "frame-gallery",
+  "frames-to-pdf": "frame-gallery",
+  frames_to_pdf: "frame-gallery",
+  "import-tool": "import-tool",
+  import_tool: "import-tool",
+  "unit-converter": "unit-converter",
+  unit_converter: "unit-converter",
+  "html-to-design": "html-to-design",
+  html_to_design: "html-to-design",
+  "comment-summarizer": "comment-summarizer",
+  comment_summarizer: "comment-summarizer",
+  profile: "profile",
+  "wayfall-game": "wayfall-game",
+  game: "wayfall-game",
+  "liquid-glass": "liquid-glass",
+  liquid_glass: "liquid-glass",
+  unknown: "unknown",
+};
+
+const ACTION_TO_TOOL = {
+  "toggle-palette": "palettable",
+  "export-palette": "palettable",
+  "export-color-schemes": "palettable",
+  "export-selected-options": "palettable",
+  "start-eyedropper": "palettable",
+  "color-copied": "palettable",
+  "copy-link": "palettable",
+  notify: "palettable",
+  emailentered: "palettable",
+  "toggle-frame-gallery": "frame-gallery",
+  "toggle-manual-selection": "frame-gallery",
+  "clear-manual-selection": "frame-gallery",
+  "get-manual-selection-state": "frame-gallery",
+  "get-all-frames": "frame-gallery",
+  "export-frames-with-dpi": "frame-gallery",
+  "export-zip-with-password": "frame-gallery",
+  "toggle-import-tool": "import-tool",
+  "toggle-favorite": "import-tool",
+  "import-svg-to-figma": "import-tool",
+  "check-font-availability": "import-tool",
+  "get-font": "import-tool",
+  "toggle-unit-converter": "unit-converter",
+  "apply-preset": "unit-converter",
+  "create-frame": "unit-converter",
+  "save-preset": "unit-converter",
+  "delete-preset": "unit-converter",
+  "load-presets": "unit-converter",
+  "load-liked-presets": "unit-converter",
+  "save-liked-presets": "unit-converter",
+  "convert-units": "unit-converter",
+  "export-frame": "unit-converter",
+  "toggle-html-to-design": "html-to-design",
+  "import-html-design-layers": "html-to-design",
+  "toggle-comment-summarizer": "comment-summarizer",
+  "open-comment-summary": "comment-summarizer",
+  "load-comments": "comment-summarizer",
+  "run-summarization": "comment-summarizer",
+  "start-new-summary": "comment-summarizer",
+  "show-comment-summarizer-tutorial": "comment-summarizer",
+  "toggle-profile": "profile",
+  "avatar-selected": "profile",
+  "store-avatar": "profile",
+  "oauth-token": "profile",
+  "store-token": "profile",
+  "clear-token": "profile",
+  "open-auth-url": "profile",
+  "copy-to-clipboard": "profile",
+  "get-token": "profile",
+  "get-session": "profile",
+  "store-session": "profile",
+  "clear-session": "profile",
+  "toggle-game": "wayfall-game",
+  "toggle-liquid-glass": "liquid-glass",
+  "lg-refresh": "liquid-glass",
+  "toggle-collapse": "collapsed-dashboard",
+  "tool-collapsed": "collapsed-dashboard",
+  "palette-to-collapsed": "collapsed-dashboard",
+  "resize-expanded": "dashboard",
+  "resize-window": "dashboard",
+  "get-ui-state": "dashboard",
+  "analytics-event": "dashboard",
+  "analytics-batch": "dashboard",
+  "analytics-identify": "dashboard",
+  "analytics-flush": "dashboard",
+  "set-analytics-endpoint": "dashboard",
+};
+
+const FEATURE_EVENT_DEFINITIONS = [
+  {
+    key: "palette_export_performed",
+    label: "Palette Export Performed",
+    category: "Palette",
+    tool: "palettable",
+    source: "feature-event",
+  },
+  {
+    key: "tool_favorite_changed",
+    label: "Tool Favorite Changed",
+    category: "Engagement",
+    tool: "dashboard",
+    source: "feature-event",
+  },
+  {
+    key: "import_file_selected",
+    label: "Import File Selected",
+    category: "Import",
+    tool: "import-tool",
+    source: "feature-event",
+  },
+  {
+    key: "import_conversion_completed",
+    label: "Import Conversion Completed",
+    category: "Import",
+    tool: "import-tool",
+    source: "feature-event",
+  },
+  {
+    key: "pdf_export_requested",
+    label: "PDF Export Requested",
+    category: "Export",
+    tool: "frame-gallery",
+    source: "feature-event",
+  },
+  {
+    key: "pdf_merge_group_exported",
+    label: "Merged PDF Group Exported",
+    category: "Export",
+    tool: "frame-gallery",
+    source: "feature-event",
+  },
+  {
+    key: "pdf_individual_exported",
+    label: "Individual PDF Exported",
+    category: "Export",
+    tool: "frame-gallery",
+    source: "feature-event",
+  },
+  {
+    key: "pdf_export_completed",
+    label: "PDF Export Completed",
+    category: "Export",
+    tool: "frame-gallery",
+    source: "feature-event",
+  },
+  {
+    key: "ui_tab_changed",
+    label: "In-Tool Tab Changed",
+    category: "Interaction",
+    tool: "dashboard",
+    source: "interaction-event",
+  },
+  {
+    key: "ui_input_changed",
+    label: "Input Changed",
+    category: "Interaction",
+    tool: "dashboard",
+    source: "interaction-event",
+  },
+  {
+    key: "ui_click",
+    label: "UI Click",
+    category: "Interaction",
+    tool: "dashboard",
+    source: "interaction-event",
+  },
+  {
+    key: "ui_keyboard_action",
+    label: "Keyboard Action",
+    category: "Interaction",
+    tool: "dashboard",
+    source: "interaction-event",
+  },
+];
+
+const ACTION_LABEL_OVERRIDES = {
+  "toggle-palette": "Toggle Palette Tool",
+  "toggle-frame-gallery": "Toggle Frames to PDF",
+  "toggle-import-tool": "Toggle Import Tool",
+  "toggle-unit-converter": "Toggle Unit Converter",
+  "toggle-html-to-design": "Toggle HTML to Design",
+  "import-html-design-layers": "Import HTML Design Layers",
+  "toggle-comment-summarizer": "Toggle Comment Summarizer",
+  "open-comment-summary": "Open Comment Summary",
+  "load-comments": "Load Comments",
+  "run-summarization": "Run Summarization",
+  "start-new-summary": "Start New Summary",
+  "show-comment-summarizer-tutorial": "Show Comment Summarizer Tutorial",
+  "toggle-profile": "Toggle Profile",
+  "toggle-game": "Toggle Wayfall Game",
+  "toggle-liquid-glass": "Toggle Liquid Glass",
+  "toggle-manual-selection": "Toggle Manual Selection",
+  "clear-manual-selection": "Clear Manual Selection",
+  "get-manual-selection-state": "Get Manual Selection State",
+  "get-all-frames": "Load Frames to PDF",
+  "export-frames-with-dpi": "Preview Frames at DPI",
+  "export-zip-with-password": "Export ZIP With Password",
+  "export-palette": "Export Palette",
+  "export-color-schemes": "Export Color Schemes",
+  "export-selected-options": "Export Selected Options",
+  "start-eyedropper": "Start Eyedropper",
+  "color-copied": "Color Copied",
+  "copy-link": "Copy Link",
+  "check-font-availability": "Check Font Availability",
+  "import-svg-to-figma": "Import SVG To Figma",
+  "load-liked-presets": "Load Liked Presets",
+  "save-liked-presets": "Save Liked Presets",
+  "load-presets": "Load Presets",
+  "save-preset": "Save Preset",
+  "delete-preset": "Delete Preset",
+  "apply-preset": "Apply Preset",
+  "create-frame": "Create Frame",
+  "convert-units": "Convert Units",
+  "export-frame": "Export Frame",
+  "toggle-collapse": "Toggle Collapse",
+  "tool-collapsed": "Tool Collapsed",
+  "palette-to-collapsed": "Palette To Collapsed",
+  "resize-expanded": "Resize Expanded",
+  "resize-window": "Resize Window",
+  "open-auth-url": "Open Auth URL",
+  "oauth-token": "OAuth Token",
+  "get-token": "Get Token",
+  "store-token": "Store Token",
+  "clear-token": "Clear Token",
+  "get-session": "Get Session",
+  "store-session": "Store Session",
+  "clear-session": "Clear Session",
+  "store-avatar": "Store Avatar",
+  "avatar-selected": "Avatar Selected",
+  "copy-to-clipboard": "Copy To Clipboard",
+  "get-font": "Get Font",
+  "get-ui-state": "Get UI State",
+  "set-analytics-endpoint": "Set Analytics Endpoint",
+  "analytics-event": "Analytics Event Relay",
+  "analytics-batch": "Analytics Batch Relay",
+  "analytics-identify": "Analytics Identify",
+  "analytics-flush": "Analytics Flush",
+  "lg-refresh": "Liquid Glass Refresh",
+};
+
+function humanizeFeatureKey(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "Unknown";
+  return raw
+    .replace(/[:._-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function inferFeatureCategory(key) {
+  const normalized = String(key || "").toLowerCase();
+  if (!normalized) return "Custom";
+  if (normalized.includes("comment") || normalized.includes("summary")) {
+    return "Comment Summarizer";
+  }
+  if (normalized.startsWith("toggle-") || normalized.includes("collapsed")) {
+    return "Navigation";
+  }
+  if (
+    normalized.startsWith("export-") ||
+    normalized.startsWith("export:") ||
+    normalized.startsWith("pdf_export_") ||
+    normalized.includes("zip")
+  ) {
+    return "Export";
+  }
+  if (normalized.startsWith("import:")) {
+    return "Import";
+  }
+  if (normalized.startsWith("palette:")) {
+    return "Palette";
+  }
+  if (
+    normalized.includes("palette") ||
+    normalized.includes("eyedropper") ||
+    normalized.includes("color")
+  ) {
+    return "Palette";
+  }
+  if (normalized.includes("import") || normalized.includes("font")) {
+    return "Import";
+  }
+  if (normalized.includes("html") && normalized.includes("design")) {
+    return "Import";
+  }
+  if (normalized.includes("frame") || normalized.includes("manual-selection")) {
+    return "Frame Workflow";
+  }
+  if (
+    normalized.includes("preset") ||
+    normalized.includes("unit") ||
+    normalized === "convert-units"
+  ) {
+    return "Unit Converter";
+  }
+  if (
+    normalized.includes("auth") ||
+    normalized.includes("token") ||
+    normalized.includes("session") ||
+    normalized.includes("avatar") ||
+    normalized.includes("profile")
+  ) {
+    return "Auth/Profile";
+  }
+  if (normalized.startsWith("analytics-") || normalized === "set-analytics-endpoint") {
+    return "System";
+  }
+  if (
+    normalized.startsWith("get-") ||
+    normalized.startsWith("load-") ||
+    normalized.startsWith("ui_")
+  ) {
+    return "Read";
+  }
+  if (
+    normalized.startsWith("save-") ||
+    normalized.startsWith("store-") ||
+    normalized.startsWith("delete-") ||
+    normalized.startsWith("clear-")
+  ) {
+    return "Write";
+  }
+  if (normalized.startsWith("click:") || normalized.startsWith("input:")) {
+    return "Interaction";
+  }
+  if (normalized.startsWith("tab:")) {
+    return "Navigation";
+  }
+  if (normalized.startsWith("key:")) {
+    return "Interaction";
+  }
+  if (
+    normalized.startsWith("favorite:") ||
+    normalized.startsWith("importer-favorite:") ||
+    normalized.includes("favorite")
+  ) {
+    return "Engagement";
+  }
+  return "Interaction";
+}
+
+function isPassiveActionKey(actionKey) {
+  const normalized = String(actionKey || "").trim().toLowerCase();
+  if (!normalized) return false;
+  if (PASSIVE_ACTION_KEY_SET.has(normalized)) return true;
+  if (normalized.startsWith("analytics-")) return true;
+  return false;
+}
+
+function isPassiveEventType(eventType) {
+  const normalized = String(eventType || "").trim();
+  if (!normalized) return false;
+  return PASSIVE_EVENT_TYPE_SET.has(normalized);
+}
+
+function buildFeatureDefinitions() {
+  const actionDefinitions = Object.keys(ACTION_TO_TOOL)
+    .filter((actionKey) => !isPassiveActionKey(actionKey))
+    .map((actionKey) => {
+    const normalized = String(actionKey).toLowerCase();
+    const mappedTool = ACTION_TO_TOOL[normalized] || "unknown";
+    return {
+      kind: "action",
+      key: normalized,
+      label: ACTION_LABEL_OVERRIDES[normalized] || humanizeFeatureKey(normalized),
+      category: inferFeatureCategory(normalized),
+      tool: mappedTool,
+      source: "plugin-action",
+    };
+  });
+
+  const eventDefinitions = FEATURE_EVENT_DEFINITIONS.map((entry) => ({
+    kind: "event",
+    key: String(entry.key),
+    label: entry.label,
+    category: entry.category,
+    tool: entry.tool,
+    source: entry.source,
+  }));
+
+  const all = actionDefinitions.concat(eventDefinitions);
+  const deduped = new Map();
+  for (const row of all) {
+    const dedupeKey = `${row.kind}:${row.key}`;
+    if (!deduped.has(dedupeKey)) {
+      deduped.set(dedupeKey, row);
+    }
+  }
+  return Array.from(deduped.values());
+}
+
+const DASHBOARD_DEFAULT_EVENTS = new Set([
+  "plugin_session_started",
+  "plugin_session_ended",
+  "session_heartbeat",
+  "ui_session_started",
+  "ui_heartbeat",
+  "ui_resize",
+  "ui_visibility_change",
+  "ui_scroll",
+  "ui_before_unload",
+  "ui_state_snapshot",
+  "ui_user_authenticated",
+  "ui_user_unauthenticated",
+  "user_context_changed",
+  "analytics_transport_updated",
+  "plugin_message",
+]);
+
+function normalizeToolId(toolId) {
+  const key = safeString(toolId, 120);
+  if (!key) return null;
+  const normalized = key.trim().toLowerCase();
+  return TOOL_ALIASES[normalized] || normalized;
+}
+
+function inferToolFromAction(action) {
+  const key = safeString(action, 120);
+  if (!key) return null;
+  const normalized = key.toLowerCase();
+  if (ACTION_TO_TOOL[normalized]) return ACTION_TO_TOOL[normalized];
+
+  if (normalized.includes("palette") || normalized.includes("color")) {
+    return "palettable";
+  }
+  if (normalized.includes("frame") || normalized.includes("zip")) {
+    return "frame-gallery";
+  }
+  if (normalized.includes("import") || normalized.includes("font")) {
+    return "import-tool";
+  }
+  if (normalized.includes("unit") || normalized.includes("preset")) {
+    return "unit-converter";
+  }
+  if (
+    normalized.includes("auth") ||
+    normalized.includes("token") ||
+    normalized.includes("session") ||
+    normalized.includes("profile") ||
+    normalized.includes("avatar")
+  ) {
+    return "profile";
+  }
+  if (normalized.includes("game")) return "wayfall-game";
+  if (normalized.includes("liquid") || normalized.includes("lg-")) {
+    return "liquid-glass";
+  }
+  return null;
+}
+
+function inferToolForEvent(eventType, payload, rawTool) {
+  const payloadObj = payload && typeof payload === "object" ? payload : {};
+  const payloadElement =
+    payloadObj.element && typeof payloadObj.element === "object"
+      ? payloadObj.element
+      : {};
+
+  const candidates = [
+    rawTool,
+    payloadObj.uiTool,
+    payloadObj.tool,
+    payloadElement.toolId,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeToolId(candidate);
+    if (normalized && normalized !== "unknown") return normalized;
+  }
+
+  const inferredFromAction = inferToolFromAction(
+    payloadObj.action || payloadObj.messageType || payloadObj.type
+  );
+  if (inferredFromAction) return inferredFromAction;
+
+  const normalizedEventType = String(eventType || "").trim().toLowerCase();
+  if (DASHBOARD_DEFAULT_EVENTS.has(normalizedEventType)) {
+    return "dashboard";
+  }
+
+  return normalizeToolId(rawTool) || "unknown";
+}
+
+function anonymousIdFromSeed(seed) {
+  const value = safeString(seed, 240);
+  if (!value) return null;
+  return `device_${stableHashId(value)}`;
+}
+
+function normalizeUser(user, fallbackAnonymousSeed = null) {
   if (!user || typeof user !== "object") {
+    const fallbackAnonymousId = anonymousIdFromSeed(fallbackAnonymousSeed);
     return {
       isAuthenticated: false,
       userId: null,
+      anonymousId: fallbackAnonymousId,
       name: null,
       email: null,
+      identitySource: fallbackAnonymousId ? "device-fallback" : null,
     };
   }
 
-  const userId =
+  const inferredUserId =
     safeString(user.userId) ||
     safeString(user.id) ||
     safeString(user._id) ||
     safeString(user.email);
+  const explicitIsAuthenticated =
+    typeof user.isAuthenticated === "boolean" ? user.isAuthenticated : null;
+  const isAuthenticated =
+    explicitIsAuthenticated !== null
+      ? explicitIsAuthenticated
+      : Boolean(inferredUserId || user.email);
+  const fallbackAnonymousId = anonymousIdFromSeed(fallbackAnonymousSeed);
+  const anonymousIdInput =
+    safeString(user.anonymousId) ||
+    safeString(user.anonId) ||
+    (isAuthenticated ? null : safeString(user.userId || user.id)) ||
+    (isAuthenticated ? null : fallbackAnonymousId);
+  const userId = isAuthenticated ? inferredUserId : null;
+  const anonymousId = isAuthenticated ? null : anonymousIdInput;
+  const identitySource =
+    safeString(user.identitySource, 80) ||
+    (isAuthenticated
+      ? "authenticated"
+      : safeString(user.anonymousId) || safeString(user.anonId)
+      ? "anonymous"
+      : fallbackAnonymousId
+      ? "device-fallback"
+      : null);
 
   return {
-    isAuthenticated: Boolean(user.isAuthenticated || userId || user.email),
+    isAuthenticated,
     userId,
-    name: safeString(user.name, 120),
-    email: safeString(user.email, 160),
+    anonymousId,
+    name: isAuthenticated ? safeString(user.name, 120) : null,
+    email: isAuthenticated ? safeString(user.email, 160) : null,
+    identitySource,
   };
 }
 
@@ -128,7 +789,8 @@ function sanitizePayload(payload) {
   return result;
 }
 
-function buildMatch(query) {
+function buildMatch(query, options = {}) {
+  const includeAction = options.includeAction !== false;
   const { from, to } = parseDateRange(query);
   const match = {
     eventAt: { $gte: from, $lte: to },
@@ -144,6 +806,21 @@ function buildMatch(query) {
     match["user.isAuthenticated"] = true;
   } else if (auth === "anonymous") {
     match["user.isAuthenticated"] = false;
+  }
+
+  if (includeAction) {
+    const actions = parseActionFilter(query.action);
+    if (actions.length) {
+      addMatchClause(match, {
+        $or: [
+          { eventType: { $in: actions } },
+          { "payload.action": { $in: actions } },
+          { "payload.messageType": { $in: actions } },
+          { "payload.interactionAction": { $in: actions } },
+          { "payload.type": { $in: actions } },
+        ],
+      });
+    }
   }
 
   return { match, from, to };
@@ -290,6 +967,7 @@ async function fetchSummaryData(eventsCollection, match) {
     totalEvents,
     uniqueSessionsRaw,
     uniqueUsersRaw,
+    uniqueAnonymousUsersRaw,
     anonymousEvents,
     sessionDurationAgg,
     topTools,
@@ -302,6 +980,11 @@ async function fetchSummaryData(eventsCollection, match) {
       ...match,
       "user.isAuthenticated": true,
       "user.userId": { $ne: null },
+    }),
+    eventsCollection.distinct("user.anonymousId", {
+      ...match,
+      "user.isAuthenticated": false,
+      "user.anonymousId": { $ne: null },
     }),
     eventsCollection.countDocuments({
       ...match,
@@ -339,6 +1022,16 @@ async function fetchSummaryData(eventsCollection, match) {
             _id: "$tool",
             events: { $sum: 1 },
             sessions: { $addToSet: "$sessionId" },
+            activeEvents: {
+              $sum: {
+                $cond: [passiveEventExpression(), 0, 1],
+              },
+            },
+            passiveEvents: {
+              $sum: {
+                $cond: [passiveEventExpression(), 1, 0],
+              },
+            },
             timeSpentMs: {
               $sum: {
                 $cond: [
@@ -363,10 +1056,12 @@ async function fetchSummaryData(eventsCollection, match) {
             tool: "$_id",
             events: 1,
             sessionCount: { $size: "$sessions" },
+            activeEvents: 1,
+            passiveEvents: 1,
             timeSpentMs: { $round: ["$timeSpentMs", 2] },
           },
         },
-        { $sort: { events: -1 } },
+        { $sort: { activeEvents: -1, events: -1 } },
         { $limit: 12 },
       ])
       .toArray(),
@@ -375,9 +1070,7 @@ async function fetchSummaryData(eventsCollection, match) {
         { $match: match },
         {
           $project: {
-            action: {
-              $ifNull: ["$payload.action", "$eventType"],
-            },
+            action: actionProjectionExpression(),
           },
         },
         {
@@ -387,7 +1080,7 @@ async function fetchSummaryData(eventsCollection, match) {
           },
         },
         { $sort: { count: -1 } },
-        { $limit: 15 },
+        { $limit: 30 },
         {
           $project: {
             _id: 0,
@@ -435,6 +1128,7 @@ async function fetchSummaryData(eventsCollection, match) {
       totalEvents,
       totalSessions: uniqueSessionsRaw.length,
       authenticatedUsers: uniqueUsersRaw.length,
+      anonymousUsers: uniqueAnonymousUsersRaw.length,
       anonymousEvents,
       avgSessionDurationMs: Math.round(toNumber(durationInfo.avgSessionDurationMs, 0)),
       maxSessionDurationMs: Math.round(toNumber(durationInfo.maxSessionDurationMs, 0)),
@@ -445,6 +1139,37 @@ async function fetchSummaryData(eventsCollection, match) {
   };
 }
 
+async function fetchActionCatalog(eventsCollection, match, limit = 180) {
+  return eventsCollection
+    .aggregate([
+      { $match: match },
+      {
+        $project: {
+          action: actionProjectionExpression(),
+          eventType: 1,
+        },
+      },
+      {
+        $group: {
+          _id: "$action",
+          count: { $sum: 1 },
+          eventTypes: { $addToSet: "$eventType" },
+        },
+      },
+      { $sort: { count: -1, _id: 1 } },
+      { $limit: limit },
+      {
+        $project: {
+          _id: 0,
+          action: "$_id",
+          count: 1,
+          eventTypes: 1,
+        },
+      },
+    ])
+    .toArray();
+}
+
 async function fetchToolUsageData(eventsCollection, match) {
   return eventsCollection
     .aggregate([
@@ -453,8 +1178,24 @@ async function fetchToolUsageData(eventsCollection, match) {
         $group: {
           _id: "$tool",
           eventCount: { $sum: 1 },
+          activeEventCount: {
+            $sum: {
+              $cond: [passiveEventExpression(), 0, 1],
+            },
+          },
+          passiveEventCount: {
+            $sum: {
+              $cond: [passiveEventExpression(), 1, 0],
+            },
+          },
+          clickCount: {
+            $sum: {
+              $cond: [{ $eq: ["$eventType", "ui_click"] }, 1, 0],
+            },
+          },
           sessionIds: { $addToSet: "$sessionId" },
-          users: { $addToSet: "$user.userId" },
+          authUsers: { $addToSet: "$user.userId" },
+          anonymousUsers: { $addToSet: "$user.anonymousId" },
           timeSpentMs: {
             $sum: {
               $cond: [
@@ -478,16 +1219,29 @@ async function fetchToolUsageData(eventsCollection, match) {
           _id: 0,
           tool: "$_id",
           eventCount: 1,
+          activeEventCount: 1,
+          passiveEventCount: 1,
+          clickCount: 1,
           sessionCount: { $size: "$sessionIds" },
-          userCount: {
+          authenticatedUserCount: {
             $size: {
-              $setDifference: ["$users", [null]],
+              $setDifference: ["$authUsers", [null]],
+            },
+          },
+          anonymousUserCount: {
+            $size: {
+              $setDifference: ["$anonymousUsers", [null]],
             },
           },
           timeSpentMs: { $round: ["$timeSpentMs", 2] },
         },
       },
-      { $sort: { eventCount: -1 } },
+      {
+        $addFields: {
+          userCount: { $add: ["$authenticatedUserCount", "$anonymousUserCount"] },
+        },
+      },
+      { $sort: { activeEventCount: -1, eventCount: -1 } },
     ])
     .toArray();
 }
@@ -530,6 +1284,8 @@ async function fetchHeatmapData(eventsCollection, match, options = {}) {
           normalizedY: "$payload.normalizedY",
           viewportWidth: "$payload.viewportWidth",
           viewportHeight: "$payload.viewportHeight",
+          action: "$payload.action",
+          actionLabel: "$payload.actionLabel",
           elementTag: "$payload.element.tag",
           elementId: "$payload.element.id",
           elementToolId: "$payload.element.toolId",
@@ -564,6 +1320,16 @@ async function fetchSessionsData(eventsCollection, match, limit = 60) {
           startedAt: { $first: "$eventAt" },
           endedAt: { $last: "$eventAt" },
           eventCount: { $sum: 1 },
+          activeEventCount: {
+            $sum: {
+              $cond: [passiveEventExpression(), 0, 1],
+            },
+          },
+          passiveEventCount: {
+            $sum: {
+              $cond: [passiveEventExpression(), 1, 0],
+            },
+          },
           user: { $last: "$user" },
           tools: { $addToSet: "$tool" },
           lastSource: { $last: "$source" },
@@ -577,6 +1343,8 @@ async function fetchSessionsData(eventsCollection, match, limit = 60) {
           endedAt: 1,
           durationMs: { $subtract: ["$endedAt", "$startedAt"] },
           eventCount: 1,
+          activeEventCount: 1,
+          passiveEventCount: 1,
           user: 1,
           tools: 1,
           lastSource: 1,
@@ -606,6 +1374,525 @@ async function fetchRecentEventsData(eventsCollection, match, limit = 120) {
     .toArray();
 }
 
+async function fetchEventTypeBreakdown(eventsCollection, match, limit = MAX_EVENT_TYPE_BREAKDOWN) {
+  return eventsCollection
+    .aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: "$eventType",
+          count: { $sum: 1 },
+          sessionIds: { $addToSet: "$sessionId" },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          eventType: "$_id",
+          count: 1,
+          sessionCount: { $size: "$sessionIds" },
+        },
+      },
+      { $sort: { count: -1 } },
+      { $limit: limit },
+    ])
+    .toArray();
+}
+
+function normalizeCompressionLevel(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "unknown";
+  if (raw === "optimal" || raw === "medium") return "medium";
+  if (raw === "low") return "low";
+  if (raw === "high") return "high";
+  return raw;
+}
+
+function normalizeColorMode(value) {
+  const raw = String(value || "").trim().toUpperCase();
+  if (raw === "CMYK") return "CMYK";
+  if (raw === "RGB") return "RGB";
+  return "UNKNOWN";
+}
+
+function sizeBucketLabel(bytes) {
+  const size = Number(bytes || 0);
+  if (!Number.isFinite(size) || size <= 0) return "unknown";
+  if (size < 5 * 1024 * 1024) return "<5MB";
+  if (size < 10 * 1024 * 1024) return "5-10MB";
+  if (size < 20 * 1024 * 1024) return "10-20MB";
+  return ">20MB";
+}
+
+function toFiniteNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function incrementCounter(counter, key, by = 1) {
+  if (!key) return;
+  counter[key] = toFiniteNumber(counter[key], 0) + by;
+}
+
+function sortCounter(counter) {
+  return Object.entries(counter)
+    .map(([key, count]) => ({
+      key,
+      count: toFiniteNumber(count, 0),
+    }))
+    .sort((a, b) => b.count - a.count);
+}
+
+function sortNamedCounter(counter, labelKey = "label") {
+  return Object.entries(counter)
+    .map(([label, count]) => ({
+      [labelKey]: label,
+      count: toFiniteNumber(count, 0),
+    }))
+    .sort((a, b) => b.count - a.count);
+}
+
+function orderedNamedCounter(counter, labelKey, order) {
+  const seen = new Set();
+  const rows = [];
+
+  for (const label of order) {
+    rows.push({
+      [labelKey]: label,
+      count: toFiniteNumber(counter[label], 0),
+    });
+    seen.add(label);
+  }
+
+  const extras = Object.entries(counter)
+    .filter(([label]) => !seen.has(label))
+    .map(([label, count]) => ({
+      [labelKey]: label,
+      count: toFiniteNumber(count, 0),
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  return rows.concat(extras);
+}
+
+function resolveEventAction(event) {
+  const payload = event && event.payload && typeof event.payload === "object"
+    ? event.payload
+    : {};
+  return (
+    safeString(payload.action, 160) ||
+    safeString(payload.messageType, 160) ||
+    safeString(payload.interactionAction, 160) ||
+    safeString(payload.type, 160) ||
+    safeString(event && event.eventType, 160) ||
+    "unknown_event"
+  );
+}
+
+function resolveNestedPayload(event) {
+  const payload = event && event.payload && typeof event.payload === "object"
+    ? event.payload
+    : {};
+  if (payload.payload && typeof payload.payload === "object") {
+    return payload.payload;
+  }
+  return payload;
+}
+
+async function fetchFeatureAnalytics(eventsCollection, match, options = {}) {
+  const limit = parseLimit(options.limit, 150000, 250000);
+  const catalogLimit = parseLimit(options.catalogLimit, 600, 2400);
+  const cursor = eventsCollection
+    .find(match)
+    .project({
+      _id: 0,
+      eventAt: 1,
+      eventType: 1,
+      tool: 1,
+      payload: 1,
+      sessionId: 1,
+      user: 1,
+    })
+    .sort({ eventAt: 1 })
+    .limit(limit);
+
+  const paletteExports = {};
+  const favoriteAdds = {};
+  const importSizeBuckets = { "<5MB": 0, "5-10MB": 0, "10-20MB": 0, ">20MB": 0, unknown: 0 };
+  const exportSizeBuckets = { "<5MB": 0, "5-10MB": 0, "10-20MB": 0, ">20MB": 0, unknown: 0 };
+  const dpiBreakdown = { "72": 0, "150": 0, "300": 0, other: 0 };
+  const compressionBreakdown = { low: 0, medium: 0, high: 0, unknown: 0 };
+  const colorModeBreakdown = { RGB: 0, CMYK: 0, UNKNOWN: 0 };
+  const mergePagesDistribution = {};
+
+  let favoriteAddCount = 0;
+  let favoriteRemoveCount = 0;
+  let collapsedModeMs = 0;
+  let expandedModeMs = 0;
+  let passwordEnabledRuns = 0;
+  let passwordDisabledRuns = 0;
+  let exportRunCount = 0;
+  let mergedPdfGroups = 0;
+  let mergedPagesTotal = 0;
+  let maxPagesPerMerge = 0;
+  const featureDefinitions = buildFeatureDefinitions();
+  const definitionByCompositeKey = new Map(
+    featureDefinitions.map((item) => [`${item.kind}:${item.key}`, item])
+  );
+  const featureStats = new Map();
+
+  function ensureFeatureStat(kind, key, defaults = {}) {
+    const compositeKey = `${kind}:${key}`;
+    if (!featureStats.has(compositeKey)) {
+      featureStats.set(compositeKey, {
+        kind,
+        key,
+        label: defaults.label || humanizeFeatureKey(key),
+        category: defaults.category || inferFeatureCategory(key),
+        tool: defaults.tool || "unknown",
+        source: defaults.source || "runtime-observed",
+        count: 0,
+        sessionSet: new Set(),
+        authUserSet: new Set(),
+        anonymousUserSet: new Set(),
+        lastSeen: null,
+      });
+    }
+    return featureStats.get(compositeKey);
+  }
+
+  for await (const event of cursor) {
+    const payload =
+      event && event.payload && typeof event.payload === "object"
+        ? event.payload
+        : {};
+    const nestedPayload = resolveNestedPayload(event);
+    const action = resolveEventAction(event);
+    const normalizedAction = String(action || "").toLowerCase();
+    const eventType = String(event && event.eventType ? event.eventType : "");
+    const sessionId = safeString(event && event.sessionId, 160);
+    const user = event && event.user && typeof event.user === "object" ? event.user : {};
+    const userId = user && user.isAuthenticated ? safeString(user.userId, 160) : null;
+    const anonymousId = !userId ? safeString(user.anonymousId, 160) : null;
+    const passiveAction = isPassiveActionKey(normalizedAction);
+    const passiveEvent = isPassiveEventType(eventType);
+
+    if (normalizedAction && !passiveAction) {
+      const actionCompositeKey = `action:${normalizedAction}`;
+      const actionDefinition =
+        definitionByCompositeKey.get(actionCompositeKey) || null;
+      const actionStat = ensureFeatureStat("action", normalizedAction, {
+        label:
+          (actionDefinition && actionDefinition.label) ||
+          ACTION_LABEL_OVERRIDES[normalizedAction] ||
+          humanizeFeatureKey(normalizedAction),
+        category:
+          (actionDefinition && actionDefinition.category) ||
+          inferFeatureCategory(normalizedAction),
+        tool:
+          (actionDefinition && actionDefinition.tool) ||
+          inferToolFromAction(normalizedAction) ||
+          normalizeToolId(event && event.tool) ||
+          "unknown",
+        source: (actionDefinition && actionDefinition.source) || "runtime-observed",
+      });
+
+      actionStat.count += 1;
+      if (sessionId) actionStat.sessionSet.add(sessionId);
+      if (userId) actionStat.authUserSet.add(userId);
+      if (anonymousId) actionStat.anonymousUserSet.add(anonymousId);
+      actionStat.lastSeen = event && event.eventAt ? event.eventAt : actionStat.lastSeen;
+    }
+
+    const eventCompositeKey = `event:${eventType}`;
+    if (!passiveEvent && definitionByCompositeKey.has(eventCompositeKey)) {
+      const eventDefinition = definitionByCompositeKey.get(eventCompositeKey);
+      const eventStat = ensureFeatureStat("event", eventType, {
+        label: eventDefinition.label,
+        category: eventDefinition.category,
+        tool: eventDefinition.tool || normalizeToolId(event && event.tool) || "unknown",
+        source: eventDefinition.source,
+      });
+      eventStat.count += 1;
+      if (sessionId) eventStat.sessionSet.add(sessionId);
+      if (userId) eventStat.authUserSet.add(userId);
+      if (anonymousId) eventStat.anonymousUserSet.add(anonymousId);
+      eventStat.lastSeen = event && event.eventAt ? event.eventAt : eventStat.lastSeen;
+    }
+
+    if (eventType === "tool_time_spent") {
+      const durationMs = toFiniteNumber(payload.durationMs || nestedPayload.durationMs, 0);
+      const modeTool = String(payload.tool || nestedPayload.tool || event.tool || "").toLowerCase();
+      if (modeTool === "collapsed-dashboard") {
+        collapsedModeMs += Math.max(durationMs, 0);
+      } else if (modeTool === "dashboard") {
+        expandedModeMs += Math.max(durationMs, 0);
+      }
+    }
+
+    const isFavoriteEvent =
+      eventType === "tool_favorite_changed" ||
+      eventType === "importer_favorite_changed" ||
+      normalizedAction.startsWith("favorite:") ||
+      normalizedAction.startsWith("importer-favorite:");
+
+    if (isFavoriteEvent) {
+      const isFavorited =
+        payload.isFavorited === true ||
+        normalizedAction.endsWith(":add");
+      const toolId =
+        safeString(
+          payload.toolId ||
+            payload.importerId ||
+            payload.toolLabel ||
+            payload.importerName ||
+            event.tool,
+          160
+        ) || "unknown";
+      if (isFavorited) {
+        incrementCounter(favoriteAdds, toolId, 1);
+        favoriteAddCount += 1;
+      } else {
+        favoriteRemoveCount += 1;
+      }
+    }
+
+    if (
+      eventType === "palette_export_performed" ||
+      normalizedAction === "export-palette" ||
+      normalizedAction === "export-color-schemes" ||
+      normalizedAction === "export-selected-options"
+    ) {
+      if (eventType === "palette_export_performed") {
+        const exportType = safeString(payload.exportType, 80) || "unknown";
+        if (exportType === "multi" && Array.isArray(payload.selectedOptions)) {
+          for (const option of payload.selectedOptions) {
+            incrementCounter(paletteExports, `selected:${safeString(option, 80) || "unknown"}`, 1);
+          }
+        } else {
+          const mode = safeString(payload.mode, 80) || "unknown";
+          incrementCounter(paletteExports, `${exportType}:${mode}`, 1);
+        }
+      } else if (normalizedAction === "export-palette") {
+        const mode = safeString(nestedPayload.mode, 80) || "unknown";
+        incrementCounter(paletteExports, `variation:${mode}`, 1);
+      } else if (normalizedAction === "export-color-schemes") {
+        const scheme = safeString(nestedPayload.schemeType, 80) || "unknown";
+        incrementCounter(paletteExports, `scheme:${scheme}`, 1);
+      } else if (normalizedAction === "export-selected-options") {
+        if (Array.isArray(nestedPayload.selectedOptions)) {
+          for (const option of nestedPayload.selectedOptions) {
+            incrementCounter(paletteExports, `selected:${safeString(option, 80) || "unknown"}`, 1);
+          }
+        } else {
+          incrementCounter(paletteExports, "selected:unknown", 1);
+        }
+      }
+    }
+
+    if (eventType === "import_file_selected") {
+      const sizeBytes = toFiniteNumber(payload.fileSizeBytes, 0);
+      incrementCounter(importSizeBuckets, sizeBucketLabel(sizeBytes), 1);
+    }
+
+    if (eventType === "pdf_export_requested") {
+      const dpiValue = toFiniteNumber(payload.dpi, 0);
+      if (dpiValue === 72 || dpiValue === 150 || dpiValue === 300) {
+        incrementCounter(dpiBreakdown, String(dpiValue), 1);
+      } else {
+        incrementCounter(dpiBreakdown, "other", 1);
+      }
+
+      const compression = normalizeCompressionLevel(payload.compression);
+      incrementCounter(compressionBreakdown, compression, 1);
+
+      const colorMode = normalizeColorMode(payload.colorMode);
+      incrementCounter(colorModeBreakdown, colorMode, 1);
+
+      if (payload.passwordEnabled === true) {
+        passwordEnabledRuns += 1;
+      } else {
+        passwordDisabledRuns += 1;
+      }
+    } else if (normalizedAction === "export-frames-with-dpi") {
+      const dpiValue = toFiniteNumber(nestedPayload.dpi, 0);
+      if (dpiValue === 72 || dpiValue === 150 || dpiValue === 300) {
+        incrementCounter(dpiBreakdown, String(dpiValue), 1);
+      } else {
+        incrementCounter(dpiBreakdown, "other", 1);
+      }
+    }
+
+    if (eventType === "pdf_merge_group_exported") {
+      const pageCount = Math.max(0, toFiniteNumber(payload.pageCount, 0));
+      if (pageCount > 0) {
+        incrementCounter(mergePagesDistribution, String(pageCount), 1);
+        maxPagesPerMerge = Math.max(maxPagesPerMerge, pageCount);
+      }
+    }
+
+    if (eventType === "pdf_export_completed") {
+      exportRunCount += 1;
+      const exportBytes = toFiniteNumber(payload.zipBytes || payload.totalPdfBytes, 0);
+      incrementCounter(exportSizeBuckets, sizeBucketLabel(exportBytes), 1);
+
+      const mergedGroups = Math.max(0, toFiniteNumber(payload.mergedGroupCount, 0));
+      const pagesTotal = Math.max(0, toFiniteNumber(payload.mergedPagesTotal, 0));
+      const maxPages = Math.max(0, toFiniteNumber(payload.maxPagesPerMergedPdf, 0));
+      mergedPdfGroups += mergedGroups;
+      mergedPagesTotal += pagesTotal;
+      maxPagesPerMerge = Math.max(maxPagesPerMerge, maxPages);
+    }
+  }
+
+  const paletteRows = sortNamedCounter(paletteExports, "palette");
+  const favoriteRows = sortNamedCounter(favoriteAdds, "tool");
+  const importBucketRows = orderedNamedCounter(importSizeBuckets, "bucket", [
+    "<5MB",
+    "5-10MB",
+    "10-20MB",
+    ">20MB",
+    "unknown",
+  ]);
+  const exportBucketRows = orderedNamedCounter(exportSizeBuckets, "bucket", [
+    "<5MB",
+    "5-10MB",
+    "10-20MB",
+    ">20MB",
+    "unknown",
+  ]);
+  const dpiRows = orderedNamedCounter(dpiBreakdown, "dpi", ["72", "150", "300", "other"]);
+  const compressionRows = orderedNamedCounter(compressionBreakdown, "compression", [
+    "low",
+    "medium",
+    "high",
+    "unknown",
+  ]);
+  const colorModeRows = orderedNamedCounter(colorModeBreakdown, "colorMode", [
+    "RGB",
+    "CMYK",
+    "UNKNOWN",
+  ]);
+  const mergeDistributionRows = Object.entries(mergePagesDistribution)
+    .map(([pages, count]) => ({
+      pages: Number(pages),
+      count: toFiniteNumber(count, 0),
+    }))
+    .filter((row) => Number.isFinite(row.pages))
+    .sort((a, b) => a.pages - b.pages);
+
+  const featureCatalogRows = [];
+
+  for (const definition of featureDefinitions) {
+    const compositeKey = `${definition.kind}:${definition.key}`;
+    const stat = featureStats.get(compositeKey);
+    const count = stat ? toFiniteNumber(stat.count, 0) : 0;
+    const sessionCount = stat ? stat.sessionSet.size : 0;
+    const authenticatedUsers = stat ? stat.authUserSet.size : 0;
+    const anonymousUsers = stat ? stat.anonymousUserSet.size : 0;
+    const userCount = authenticatedUsers + anonymousUsers;
+    featureCatalogRows.push({
+      kind: definition.kind,
+      key: definition.key,
+      label: definition.label,
+      category: definition.category,
+      tool: definition.tool,
+      source: definition.source,
+      count,
+      sessionCount,
+      authenticatedUsers,
+      anonymousUsers,
+      userCount,
+      lastSeen: stat && stat.lastSeen ? stat.lastSeen : null,
+      status: count > 0 ? "active" : "inactive",
+    });
+  }
+
+  for (const stat of featureStats.values()) {
+    const compositeKey = `${stat.kind}:${stat.key}`;
+    if (definitionByCompositeKey.has(compositeKey)) continue;
+    const authenticatedUsers = stat.authUserSet.size;
+    const anonymousUsers = stat.anonymousUserSet.size;
+    featureCatalogRows.push({
+      kind: stat.kind,
+      key: stat.key,
+      label: stat.label || humanizeFeatureKey(stat.key),
+      category: stat.category || inferFeatureCategory(stat.key),
+      tool: stat.tool || "unknown",
+      source: stat.source || "runtime-observed",
+      count: toFiniteNumber(stat.count, 0),
+      sessionCount: stat.sessionSet.size,
+      authenticatedUsers,
+      anonymousUsers,
+      userCount: authenticatedUsers + anonymousUsers,
+      lastSeen: stat.lastSeen || null,
+      status: toFiniteNumber(stat.count, 0) > 0 ? "active" : "inactive",
+    });
+  }
+
+  featureCatalogRows.sort((a, b) => {
+    const countDiff = toFiniteNumber(b.count, 0) - toFiniteNumber(a.count, 0);
+    if (countDiff !== 0) return countDiff;
+    return String(a.label || "").localeCompare(String(b.label || ""));
+  });
+
+  const activeFeatureCount = featureCatalogRows.filter(
+    (item) => item.status === "active"
+  ).length;
+  const trackableFeatureCount = featureDefinitions.length;
+  const featureCoverageRate =
+    trackableFeatureCount > 0
+      ? Number((activeFeatureCount / trackableFeatureCount).toFixed(4))
+      : 0;
+  const topFeature = featureCatalogRows.find((item) => item.count > 0) || null;
+  const limitedFeatureCatalogRows = featureCatalogRows.slice(0, catalogLimit);
+
+  return {
+    kpis: {
+      paletteExportEvents: paletteRows.reduce((sum, row) => sum + row.count, 0),
+      topPaletteExport: paletteRows[0] || null,
+      favoriteAdds: favoriteAddCount,
+      favoriteRemoves: favoriteRemoveCount,
+      topFavoritedTool: favoriteRows[0] || null,
+      collapsedModeMs: Math.round(collapsedModeMs),
+      expandedModeMs: Math.round(expandedModeMs),
+      exportRuns: exportRunCount,
+      passwordEnabledRuns,
+      passwordDisabledRuns,
+      mergedPdfGroups,
+      mergedPagesTotal,
+      avgPagesPerMerge:
+        mergedPdfGroups > 0 ? Number((mergedPagesTotal / mergedPdfGroups).toFixed(2)) : 0,
+      maxPagesPerMerge,
+      activeFeatureCount,
+      trackableFeatureCount,
+      featureCoverageRate,
+      topFeature,
+    },
+    paletteExports: paletteRows,
+    favoritedTools: favoriteRows,
+    modeTime: {
+      collapsedMs: Math.round(collapsedModeMs),
+      expandedMs: Math.round(expandedModeMs),
+      collapsedShare:
+        collapsedModeMs + expandedModeMs > 0
+          ? Number((collapsedModeMs / (collapsedModeMs + expandedModeMs)).toFixed(4))
+          : 0,
+      expandedShare:
+        collapsedModeMs + expandedModeMs > 0
+          ? Number((expandedModeMs / (collapsedModeMs + expandedModeMs)).toFixed(4))
+          : 0,
+    },
+    importSizeBuckets: importBucketRows,
+    exportSizeBuckets: exportBucketRows,
+    dpiBreakdown: dpiRows,
+    compressionBreakdown: compressionRows,
+    colorModeBreakdown: colorModeRows,
+    mergeDistribution: mergeDistributionRows,
+    featureCatalog: limitedFeatureCatalogRows,
+  };
+}
+
 app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
   try {
     const body = req.body || {};
@@ -623,26 +1910,36 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
       sentAt: toDate(body.sentAt, now),
       runtime: body.runtime && typeof body.runtime === "object" ? body.runtime : {},
       plugin: body.plugin && typeof body.plugin === "object" ? body.plugin : {},
-      user: normalizeUser(body.user),
+      user: normalizeUser(body.user, safeString(body.deviceId, 120) || safeString(body.sessionId, 120)),
     };
 
     const docs = inputEvents.slice(0, 1000).map((event) => {
       const eventType = safeString(event && (event.eventType || event.type), 120) || "unknown_event";
       const eventAt = toDate(event && (event.eventAt || event.timestamp), envelope.sentAt || now);
-      const user = normalizeUser((event && event.user) || envelope.user);
+      const eventDeviceId =
+        safeString(event && event.deviceId, 120) || envelope.deviceId || "unknown-device";
+      const eventSessionId =
+        safeString(event && event.sessionId, 120) || envelope.sessionId || "unknown-session";
+      const payload = sanitizePayload(event && event.payload);
+      const user = normalizeUser(
+        (event && event.user) || envelope.user,
+        eventDeviceId || eventSessionId
+      );
+      const rawTool =
+        safeString(event && event.tool, 120) ||
+        safeString(payload && payload.uiTool, 120) ||
+        null;
+      const tool = inferToolForEvent(eventType, payload, rawTool);
 
       return {
-        sessionId: safeString(event && event.sessionId, 120) || envelope.sessionId || "unknown-session",
-        deviceId: safeString(event && event.deviceId, 120) || envelope.deviceId || "unknown-device",
+        sessionId: eventSessionId,
+        deviceId: eventDeviceId,
         eventType,
         eventAt,
         receivedAt: now,
         source: safeString(event && event.source, 80) || envelope.source,
-        tool:
-          safeString(event && event.tool, 120) ||
-          safeString(event && event.payload && event.payload.uiTool, 120) ||
-          "unknown",
-        payload: sanitizePayload(event && event.payload),
+        tool,
+        payload,
         user,
         runtime: envelope.runtime,
         plugin: envelope.plugin,
@@ -742,10 +2039,28 @@ app.get("/api/plugin-analytics/recent-events", async (req, res) => {
   }
 });
 
+app.get("/api/plugin-analytics/features", async (req, res) => {
+  try {
+    const eventsCollection = await getEventsCollection();
+    const { match, from, to } = buildMatch(req.query);
+    const featureLimit = parseLimit(req.query.featureLimit, 120000, 250000);
+    const featureCatalogLimit = parseLimit(req.query.featureCatalogLimit, 600, 2400);
+    const features = await fetchFeatureAnalytics(eventsCollection, match, {
+      limit: featureLimit,
+      catalogLimit: featureCatalogLimit,
+    });
+    return res.json({ from, to, ...features });
+  } catch (error) {
+    console.error("Feature analytics query failed:", error);
+    return res.status(500).json({ error: "Failed to load feature analytics" });
+  }
+});
+
 app.get("/api/plugin-analytics/dashboard", async (req, res) => {
   try {
     const eventsCollection = await getEventsCollection();
     const { match, from, to } = buildMatch(req.query);
+    const { match: baseMatch } = buildMatch(req.query, { includeAction: false });
     const toolFilter = safeString(req.query.tool, 120);
     const heatmapCompact = parseBool(req.query.heatmapCompact, true);
     const heatmapLimit = heatmapCompact
@@ -756,7 +2071,7 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
     const sessionsLimit = parseLimit(req.query.sessionsLimit, 60, 300);
     const recentEventsLimit = parseLimit(req.query.eventsLimit, 100, 1000);
 
-    const [summary, tools, heatmap, sessions, events] = await Promise.all([
+    const [summary, tools, heatmap, sessions, events, eventTypeBreakdown, actionCatalog] = await Promise.all([
       fetchSummaryData(eventsCollection, match),
       fetchToolUsageData(eventsCollection, match),
       fetchHeatmapData(eventsCollection, match, {
@@ -768,13 +2083,17 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
       }),
       fetchSessionsData(eventsCollection, match, sessionsLimit),
       fetchRecentEventsData(eventsCollection, match, recentEventsLimit),
+      fetchEventTypeBreakdown(eventsCollection, match),
+      fetchActionCatalog(eventsCollection, baseMatch),
     ]);
 
     return res.json({
       from,
       to,
       summary,
+      actionCatalog: { actions: actionCatalog },
       toolUsage: { tools },
+      eventTypeBreakdown,
       heatmap,
       sessions: { sessions },
       recentEvents: { events },

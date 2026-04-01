@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Feature Intelligence</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Plugin Analytics</p>
+        <h1>Feature Intelligence</h1>
+        <p class="subtitle">
+          Export, import, merge, compression, DPI, color mode, favorites, and palette behavior analytics.
+        </p>
+      </div>
+      <div class="header-actions">
+        <nav class="top-nav">
+          <a class="nav-link" href="/">Overview</a>
+          <a class="nav-link active" href="/features.html">Feature Intelligence</a>
+          <a class="nav-link" href="/heatmap.html">Heatmap Lab</a>
+        </nav>
+        <button id="refreshBtn" class="primary-btn">Refresh</button>
+      </div>
+    </header>
+
+    <section class="filters">
+      <label>
+        Range
+        <select id="rangePreset">
+          <option value="24h">Last 24 hours</option>
+          <option value="7d" selected>Last 7 days</option>
+          <option value="30d">Last 30 days</option>
+          <option value="custom">Custom</option>
+        </select>
+      </label>
+      <label>
+        From
+        <input id="fromDate" type="datetime-local" />
+      </label>
+      <label>
+        To
+        <input id="toDate" type="datetime-local" />
+      </label>
+      <label>
+        Tool
+        <select id="toolFilter">
+          <option value="all">All tools</option>
+        </select>
+      </label>
+      <label>
+        User type
+        <select id="authFilter">
+          <option value="all" selected>All</option>
+          <option value="authenticated">Authenticated only</option>
+          <option value="anonymous">Anonymous only</option>
+        </select>
+      </label>
+      <label>
+        Action
+        <select id="actionFilter">
+          <option value="all">All actions</option>
+        </select>
+      </label>
+    </section>
+
+    <section id="featureKpis" class="kpi-grid kpi-grid-8"></section>
+
+    <section class="card-grid two-up">
+      <article class="card">
+        <h2>Most Exported Palette Variants</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Palette / Mode</th>
+                <th>Count</th>
+              </tr>
+            </thead>
+            <tbody id="paletteBody"></tbody>
+          </table>
+        </div>
+      </article>
+      <article class="card">
+        <h2>Most Favorited Tools</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tool</th>
+                <th>Favorite Adds</th>
+              </tr>
+            </thead>
+            <tbody id="favoriteBody"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="card-grid three-up">
+      <article class="card">
+        <h2>Import Size Buckets</h2>
+        <div id="importBuckets" class="bucket-grid"></div>
+      </article>
+      <article class="card">
+        <h2>Export Size Buckets</h2>
+        <div id="exportBuckets" class="bucket-grid"></div>
+      </article>
+      <article class="card">
+        <h2>Shrink vs Full Mode Time</h2>
+        <div id="modeTimeCards" class="bucket-grid"></div>
+      </article>
+    </section>
+
+    <section class="card-grid three-up">
+      <article class="card">
+        <h2>DPI Usage</h2>
+        <div id="dpiBreakdown" class="bucket-grid"></div>
+      </article>
+      <article class="card">
+        <h2>Compression Usage</h2>
+        <div id="compressionBreakdown" class="bucket-grid"></div>
+      </article>
+      <article class="card">
+        <h2>Color Mode</h2>
+        <div id="colorModeBreakdown" class="bucket-grid"></div>
+      </article>
+    </section>
+
+    <section class="card">
+      <h2>Merged PDF Intelligence</h2>
+      <div id="mergeSummary" class="merge-summary"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Pages per Merged PDF</th>
+              <th>Count</th>
+            </tr>
+          </thead>
+          <tbody id="mergeDistBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-title-row">
+        <h2>Full Plugin Feature Coverage</h2>
+        <span id="featureCoverageMeta" class="muted">-</span>
+      </div>
+      <div class="feature-filter-row">
+        <label>
+          Feature status
+          <select id="featureStatusFilter">
+            <option value="all">All</option>
+            <option value="active">Active only</option>
+            <option value="inactive">Inactive only</option>
+          </select>
+        </label>
+        <label>
+          Category
+          <select id="featureCategoryFilter">
+            <option value="all">All categories</option>
+          </select>
+        </label>
+        <label>
+          Search
+          <input id="featureSearchInput" type="text" placeholder="Search feature/action/tool..." />
+        </label>
+      </div>
+      <div class="table-wrap feature-catalog-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Feature</th>
+              <th>Type</th>
+              <th>Tool</th>
+              <th>Category</th>
+              <th>Events</th>
+              <th>Sessions</th>
+              <th>Users</th>
+              <th>Last Seen</th>
+            </tr>
+          </thead>
+          <tbody id="featureCatalogBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <p id="statusLine" class="status">Loading…</p>
+
+    <script type="module" src="/features.js"></script>
+  </body>
+</html>

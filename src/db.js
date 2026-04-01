@@ -80,7 +80,12 @@ export async function ensureIndexes() {
     events.createIndex({ sessionId: 1, eventAt: 1 }),
     events.createIndex({ eventType: 1, eventAt: -1 }),
     events.createIndex({ tool: 1, eventAt: -1 }),
+    events.createIndex({ "payload.action": 1, eventAt: -1 }),
+    events.createIndex({ "payload.messageType": 1, eventAt: -1 }),
+    events.createIndex({ "payload.type": 1, eventAt: -1 }),
+    events.createIndex({ "payload.interactionAction": 1, eventAt: -1 }),
     events.createIndex({ "user.userId": 1, eventAt: -1 }),
+    events.createIndex({ "user.anonymousId": 1, eventAt: -1 }),
     events.createIndex({ source: 1, eventAt: -1 }),
   ]);
 }
