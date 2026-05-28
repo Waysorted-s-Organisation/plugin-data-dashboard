@@ -794,6 +794,15 @@ function buildMatch(query, options = {}) {
   const { from, to } = parseDateRange(query);
   const match = {
     eventAt: { $gte: from, $lte: to },
+    eventType: {
+      $nin: [
+        "session_heartbeat",
+        "plugin_message",
+        "analytics_transport_updated",
+        "tool_context_changed",
+        "backend_operation"
+      ]
+    }
   };
 
   const tool = safeString(query.tool, 80);
@@ -1981,7 +1990,20 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
       user: normalizeUser(body.user, safeString(body.deviceId, 120) || safeString(body.sessionId, 120)),
     };
 
-    const docs = inputEvents.slice(0, 1000).map((event) => {
+    const ignoredEventTypes = new Set([
+      "session_heartbeat",
+      "plugin_message",
+      "analytics_transport_updated",
+      "tool_context_changed",
+      "backend_operation"
+    ]);
+
+    const cleanEvents = inputEvents.filter(event => {
+      const type = safeString(event && (event.eventType || event.type), 120);
+      return !ignoredEventTypes.has(type);
+    });
+
+    const docs = cleanEvents.slice(0, 1000).map((event) => {
       const eventType = safeString(event && (event.eventType || event.type), 120) || "unknown_event";
       const eventAt = toDate(event && (event.eventAt || event.timestamp), envelope.sentAt || now);
       const eventDeviceId =
@@ -2389,7 +2411,7 @@ app.post("/api/plugin-analytics/stats/:action", async (req, res) => {
   }
 });
 
-app.get("/api/plugin-analytics/stats/history", readAuthGate, async (req, res) => {
+app.get("/api/plugin-analytics/stats/history", async (req, res) => {
   try {
     const snapshotsCollection = await getSnapshotsCollection();
     const range = safeString(req.query.range, 10) || "90d";
