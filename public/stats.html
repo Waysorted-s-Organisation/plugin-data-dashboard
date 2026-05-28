@@ -84,10 +84,15 @@
       /* ── Metric Tabs ────────────────────────────────── */
       .metric-tabs {
         display: flex;
-        gap: 0;
+        gap: 8px;
         overflow-x: auto;
-        margin-bottom: 16px;
-        border-bottom: 1px solid var(--line-soft);
+        margin-bottom: 24px;
+        padding-bottom: 8px;
+        border: none;
+        scrollbar-width: none;
+      }
+      .metric-tabs::-webkit-scrollbar {
+        display: none;
       }
       .metric-tab {
         flex: 1;
@@ -96,33 +101,38 @@
         flex-direction: column;
         align-items: center;
         gap: 4px;
-        padding: 14px 12px 12px;
-        border: none;
-        border-bottom: 2px solid transparent;
-        background: transparent;
+        padding: 16px 12px 14px;
+        border: 1px solid rgba(156, 182, 255, 0.08);
+        border-radius: 14px;
+        background: linear-gradient(155deg, rgba(15, 28, 54, 0.8), rgba(16, 31, 58, 0.6));
         color: var(--muted);
         font-family: inherit;
-        font-size: 12px;
+        font-size: 13px;
         font-weight: 700;
         letter-spacing: 0.03em;
         text-transform: uppercase;
         cursor: pointer;
         transition: all 150ms ease;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
       }
       .metric-tab:hover {
         color: var(--text);
-        background: rgba(93, 155, 255, 0.06);
+        background: linear-gradient(155deg, rgba(20, 36, 66, 0.9), rgba(20, 38, 70, 0.8));
+        transform: translateY(-2px);
       }
       .metric-tab.active {
         color: var(--accent);
-        border-bottom-color: var(--accent);
+        border-color: rgba(93, 155, 255, 0.4);
+        background: linear-gradient(155deg, rgba(15, 28, 54, 0.95), rgba(24, 45, 84, 0.9));
+        box-shadow: 0 8px 24px rgba(93, 155, 255, 0.2);
       }
       .metric-tab-value {
-        font-size: 22px;
+        font-size: 26px;
         font-weight: 700;
         letter-spacing: -0.02em;
         text-transform: none;
         color: var(--text);
+        margin-bottom: 4px;
       }
       .metric-tab.active .metric-tab-value {
         color: var(--accent);
@@ -247,7 +257,9 @@
           <a class="nav-link" href="/heatmap.html">Heatmap Lab</a>
           <a class="nav-link" href="/credits.html">Credit Consumption</a>
           <a class="nav-link active" href="/stats.html" aria-current="page">Public Stats</a>
-        </nav>
+        <button class="action-btn" data-action="like" style="margin-left: 12px;">Like Plugin</button>
+        <button class="action-btn" data-action="save">Save</button>
+        <button class="action-btn" data-action="follow">Follow</button>
       </div>
     </header>
 
@@ -258,10 +270,7 @@
       <p class="subtitle">Live analytics and community engagement</p>
     </section>
 
-    <!-- ── KPI Summary Cards ─────────────────────────── -->
-    <section id="kpiGrid" class="stats-kpi-grid">
-      <!-- Rendered by stats.js -->
-    </section>
+
 
     <!-- ── Controls: Range + Mode ────────────────────── -->
     <div class="controls-bar" role="toolbar" aria-label="Chart Controls">
@@ -315,34 +324,7 @@
     </section>
 
     <!-- ── Action Buttons ────────────────────────────── -->
-    <div class="actions-row">
-      <button class="action-btn" data-action="like">Like Plugin</button>
-      <button class="action-btn" data-action="save">Save</button>
-      <button class="action-btn" data-action="follow">Follow</button>
-    </div>
-
-    <!-- ── Historical Data Table ─────────────────────── -->
-    <section class="card" style="margin-top: 4px;">
-      <h2>Historical Data</h2>
-      <div class="table-wrap history-table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Users</th>
-              <th>Likes</th>
-              <th>Saves</th>
-              <th>Follows</th>
-              <th>Auths</th>
-              <th>Reused</th>
-            </tr>
-          </thead>
-          <tbody id="historyBody">
-            <!-- Rendered by stats.js -->
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <!-- Moved to header -->
 
     <p id="statusLine" class="status" style="text-align: center;">Loading stats...</p>
 

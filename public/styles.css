@@ -100,6 +100,32 @@ h1 {
 .top-nav::-webkit-scrollbar {
   display: none;
 }
+.metric-tab {
+  flex: 1;
+  min-width: 100px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 18px 12px 14px;
+  border: none;
+  border-bottom: 3px solid transparent;
+  background: rgba(13, 22, 44, 0.4);
+  border-radius: 12px 12px 0 0;
+  margin: 0 4px;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 200ms ease;
+}
+.metric-tab:hover {
+  color: var(--text);
+  background: rgba(93, 155, 255, 0.08);
+}
 
 .nav-link {
   display: inline-flex;
@@ -311,13 +337,14 @@ select:focus {
 }
 
 .card {
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: linear-gradient(155deg, rgba(15, 28, 54, 0.96), rgba(16, 31, 58, 0.95));
-  padding: 12px;
+  border: 1px solid rgba(156, 182, 255, 0.08);
+  border-radius: 16px;
+  background: linear-gradient(155deg, rgba(15, 28, 54, 0.8), rgba(16, 31, 58, 0.6));
+  padding: 16px;
   box-shadow: var(--shadow);
   overflow: hidden;
   contain: layout paint;
+  backdrop-filter: blur(12px);
 }
 
 h2 {

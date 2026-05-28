@@ -3,11 +3,9 @@
    ────────────────────────────────────────────────────── */
 
 // ── DOM References ──────────────────────────────────────
-const kpiGrid      = document.getElementById('kpiGrid');
 const metricTabs   = document.getElementById('metricTabs');
 const rangeGroup   = document.getElementById('rangeGroup');
 const modeGroup    = document.getElementById('modeGroup');
-const historyBody  = document.getElementById('historyBody');
 const statusLine   = document.getElementById('statusLine');
 const chartCanvas  = document.getElementById('statsChart');
 const actionBtns   = document.querySelectorAll('.action-btn');
@@ -65,7 +63,6 @@ async function loadStats() {
     if (!res.ok) throw new Error('Failed to load stats');
     statsData = await res.json();
 
-    renderKPIs(statsData);
     updateTabValues(statsData);
     statusLine.style.display = 'none';
   } catch (err) {
@@ -73,21 +70,6 @@ async function loadStats() {
     statusLine.textContent = 'Error loading stats.';
     statusLine.className = 'status bad';
   }
-}
-
-function renderKPIs(data) {
-  const deltas = data.deltas?.daily || {};
-  const cards = METRICS.map(m => {
-    const val   = data[m.key] ?? 0;
-    const delta = deltas[m.key] ?? null;
-    return `
-      <div class="kpi-card">
-        <p class="kpi-label">${m.label}</p>
-        <p class="kpi-value">${fmt(val)}</p>
-        <p class="kpi-sub">${deltaHTML(delta)}</p>
-      </div>`;
-  }).join('');
-  kpiGrid.innerHTML = cards;
 }
 
 function updateTabValues(data) {
@@ -108,12 +90,10 @@ async function loadHistory(range) {
     historyData.sort((a, b) => new Date(a.date || a._id) - new Date(b.date || b._id));
 
     renderChart(currentMetric, currentMode);
-    renderTable(historyData);
   } catch (err) {
     console.error('loadHistory error:', err);
     historyData = [];
     renderChart(currentMetric, currentMode);
-    renderTable([]);
   }
 }
 
@@ -147,7 +127,11 @@ function renderChart(metric, mode) {
   if (noData) noData.remove();
 
   const labels = historyData.map(d => fmtDateShort(d.date || d._id));
-  let values   = historyData.map(d => d[metric] ?? 0);
+  let values   = historyData.map(d => {
+    if (metric === 'reused') return d.reuses ?? d.reused ?? 0;
+    if (metric === 'installs') return d.authenticatedUsers ?? d.installs ?? 0;
+    return d[metric] ?? 0;
+  });
 
   // Cumulative mode: running total
   if (mode === 'cumulative') {
@@ -178,8 +162,8 @@ function renderChart(metric, mode) {
         backgroundColor: gradient,
         fill: true,
         tension: 0.3,
-        pointRadius: 0,
-        pointHoverRadius: 5,
+        pointRadius: historyData.length <= 1 ? 6 : 0,
+        pointHoverRadius: 6,
         pointHoverBackgroundColor: '#5d9bff',
         pointHoverBorderColor: '#fff',
         pointHoverBorderWidth: 2,
@@ -234,33 +218,7 @@ function renderChart(metric, mode) {
   });
 }
 
-// ── Render Historical Table ─────────────────────────────
-function renderTable(data) {
-  if (!historyBody) return;
 
-  if (!data || data.length === 0) {
-    historyBody.innerHTML = `
-      <tr>
-        <td colspan="7" style="text-align:center; padding:32px; color:var(--muted);">
-          No data yet
-        </td>
-      </tr>`;
-    return;
-  }
-
-  // Show newest first in table
-  const sorted = [...data].reverse();
-  historyBody.innerHTML = sorted.map(row => `
-    <tr>
-      <td>${fmtDate(row.date || row._id)}</td>
-      <td>${row.mau ?? 0}</td>
-      <td>${row.likes ?? 0}</td>
-      <td>${row.saves ?? 0}</td>
-      <td>${row.follows ?? 0}</td>
-      <td>${row.installs ?? 0}</td>
-      <td>${row.reused ?? 0}</td>
-    </tr>`).join('');
-}
 
 // ── Action Buttons (Like / Save / Follow) ───────────────
 async function performAction(action) {
