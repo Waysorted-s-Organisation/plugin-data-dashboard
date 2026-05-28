@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Credit Consumption Tracker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <style>
+      .sortable { cursor: pointer; user-select: none; }
+      .sortable:hover { color: var(--accent); }
+      .sort-indicator { font-size: 10px; margin-left: 4px; opacity: 0.7; }
+      .search-input {
+        max-width: 320px;
+        margin-bottom: 0;
+      }
+      .table-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+        flex-wrap: wrap;
+      }
+      .depletion-estimate {
+        font-size: 11px;
+        color: var(--warn);
+        margin-top: 2px;
+      }
+      .depletion-safe {
+        color: var(--good);
+      }
+      .depletion-danger {
+        color: var(--bad);
+      }
+      .export-btn {
+        border: 1px solid var(--line);
+        background: var(--panel-2);
+        color: var(--text);
+        font-weight: 700;
+        padding: 10px 16px;
+        border-radius: 10px;
+        cursor: pointer;
+        font-family: inherit;
+        font-size: 13px;
+        transition: transform 120ms ease, border-color 120ms ease;
+      }
+      .export-btn:hover {
+        transform: translateY(-1px);
+        border-color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Plugin Analytics</p>
+        <h1>Credit Consumption Tracker</h1>
+        <p class="subtitle">
+          Monitor user credit balances, track credit spend, and identify heavy tool users in real-time.
+        </p>
+      </div>
+      <div class="header-actions">
+        <nav class="top-nav">
+          <a class="nav-link" href="/">Overview</a>
+          <a class="nav-link" href="/features.html">Feature Intelligence</a>
+          <a class="nav-link" href="/heatmap.html">Heatmap Lab</a>
+          <a class="nav-link active" href="/credits.html">Credit Consumption</a>
+          <a class="nav-link" href="/stats.html">Public Stats</a>
+        </nav>
+        <button id="exportBtn" class="export-btn">Export CSV</button>
+        <button id="refreshBtn" class="primary-btn">Refresh</button>
+      </div>
+    </header>
+
+    <section id="kpiGrid" class="kpi-grid"></section>
+
+    <section class="card-grid two-up" style="margin-bottom: 12px;">
+      <article class="card">
+        <h2>Credit Consumption by Tool</h2>
+        <div class="chart-wrap">
+          <canvas id="toolBreakdownChart"></canvas>
+        </div>
+      </article>
+      <article class="card" style="display: flex; flex-direction: column; justify-content: center; align-items: center;">
+        <div id="toolBreakdownEmpty" style="display: none; text-align: center;">
+          <p class="muted">Tool breakdown data is not available yet.</p>
+          <p class="muted" style="font-size: 11px;">The by-tool endpoint may still be loading.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="card">
+      <div class="table-toolbar">
+        <h2 style="margin: 0;">User Credits Overview</h2>
+        <input
+          id="searchInput"
+          class="search-input"
+          type="text"
+          placeholder="Search by name or email..."
+        />
+      </div>
+      <div class="table-wrap" style="max-height: 600px;">
+        <table>
+          <thead>
+            <tr>
+              <th>User</th>
+              <th class="sortable" data-sort="creditsRemaining">Available Credits <span class="sort-indicator"></span></th>
+              <th class="sortable" data-sort="totalConsumed">Credits Consumed <span class="sort-indicator"></span></th>
+              <th>Top Tools</th>
+              <th class="sortable" data-sort="lastSeen">Last Active <span class="sort-indicator"></span></th>
+              <th class="sortable" data-sort="depletion">Projected Depletion <span class="sort-indicator"></span></th>
+            </tr>
+          </thead>
+          <tbody id="usersBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <p id="statusLine" class="status">Loading...</p>
+
+    <script type="module" src="/credits.js"></script>
+  </body>
+</html>

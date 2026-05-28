@@ -7,7 +7,7 @@ import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 
-import { ensureIndexes, getEventsCollection } from "./db.js";
+import { ensureIndexes, getEventsCollection, getEngagementCollection, getSnapshotsCollection } from "./db.js";
 
 dotenv.config();
 
@@ -929,6 +929,7 @@ export async function initializeServer() {
   if (isInitialized) return;
   if (!initializationPromise) {
     initializationPromise = ensureIndexes()
+      .then(() => recordDailySnapshot())
       .then(() => {
         isInitialized = true;
       })
@@ -939,6 +940,73 @@ export async function initializeServer() {
   }
 
   await initializationPromise;
+}
+
+async function recordDailySnapshot() {
+  try {
+    const now = new Date();
+    const dateString = now.toISOString().slice(0, 10);
+    const snapshotsCollection = await getSnapshotsCollection();
+
+    const existing = await snapshotsCollection.findOne({ _id: dateString });
+    if (existing) return;
+
+    const eventsCollection = await getEventsCollection();
+    const engagementCollection = await getEngagementCollection();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const todayStart = new Date(dateString + "T00:00:00.000Z");
+    const todayEnd = new Date(dateString + "T23:59:59.999Z");
+
+    const [
+      authMAU,
+      anonMAU,
+      authUsersArr,
+      globalStats,
+      creditCount,
+      activeSessionsArr,
+    ] = await Promise.all([
+      eventsCollection.distinct("user.userId", {
+        eventAt: { $gte: thirtyDaysAgo },
+        "user.isAuthenticated": true,
+        "user.userId": { $ne: null },
+      }),
+      eventsCollection.distinct("user.anonymousId", {
+        eventAt: { $gte: thirtyDaysAgo },
+        "user.isAuthenticated": false,
+        "user.anonymousId": { $ne: null },
+      }),
+      eventsCollection.distinct("user.userId", {
+        eventAt: { $gte: thirtyDaysAgo },
+        "user.isAuthenticated": true,
+        "user.userId": { $ne: null },
+      }),
+      engagementCollection.findOne({ _id: "global_stats" }),
+      eventsCollection.countDocuments({ eventType: "credit_consumed" }),
+      eventsCollection.distinct("sessionId", {
+        eventAt: { $gte: todayStart, $lte: todayEnd },
+      }),
+    ]);
+
+    const stats = globalStats || {};
+    const snapshot = {
+      _id: dateString,
+      date: new Date(dateString),
+      mau: authMAU.length + anonMAU.length,
+      authenticatedUsers: authUsersArr.length,
+      likes: stats.likes || 0,
+      saves: stats.saves || 0,
+      follows: stats.follows || 0,
+      reuses: stats.reused || 0,
+      creditsConsumed: creditCount,
+      activeSessions: activeSessionsArr.length,
+      recordedAt: now,
+    };
+
+    await snapshotsCollection.insertOne(snapshot);
+    console.log(`Daily snapshot recorded for ${dateString}`);
+  } catch (error) {
+    console.error("Failed to record daily snapshot:", error);
+  }
 }
 
 app.get("/health", (_req, res) => {
@@ -2101,6 +2169,417 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
   } catch (error) {
     console.error("Dashboard query failed:", error);
     return res.status(500).json({ error: "Failed to load dashboard" });
+  }
+});
+
+app.get("/api/plugin-analytics/mau", readAuthGate, async (req, res) => {
+  try {
+    const eventsCollection = await getEventsCollection();
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    
+    const [authMAU, anonMAU] = await Promise.all([
+      eventsCollection.distinct("user.userId", {
+        eventAt: { $gte: thirtyDaysAgo },
+        "user.isAuthenticated": true,
+        "user.userId": { $ne: null }
+      }),
+      eventsCollection.distinct("user.anonymousId", {
+        eventAt: { $gte: thirtyDaysAgo },
+        "user.isAuthenticated": false,
+        "user.anonymousId": { $ne: null }
+      })
+    ]);
+
+    res.json({
+      mau: authMAU.length + anonMAU.length,
+      authenticated: authMAU.length,
+      anonymous: anonMAU.length,
+      since: thirtyDaysAgo.toISOString()
+    });
+  } catch (error) {
+    console.error("MAU query failed:", error);
+    res.status(500).json({ error: "Failed to load MAU" });
+  }
+});
+
+app.get("/api/plugin-analytics/credit-consumption", readAuthGate, async (req, res) => {
+  try {
+    const eventsCollection = await getEventsCollection();
+    
+    // Aggregate credit consumptions and get latest credits remaining per user
+    const pipeline = [
+      {
+        $match: {
+          $or: [
+            { eventType: "credit_consumed" },
+            { "user.creditsRemaining": { $exists: true, $ne: null } }
+          ]
+        }
+      },
+      {
+        $sort: { eventAt: -1 }
+      },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              { $eq: ["$user.isAuthenticated", true] },
+              "$user.userId",
+              "$user.anonymousId"
+            ]
+          },
+          name: { $first: "$user.name" },
+          email: { $first: "$user.email" },
+          creditsRemaining: { $first: "$user.creditsRemaining" },
+          totalConsumed: {
+            $sum: {
+              $cond: [{ $eq: ["$eventType", "credit_consumed"] }, 1, 0]
+            }
+          },
+          lastSeen: { $first: "$eventAt" }
+        }
+      },
+      {
+        $match: {
+          _id: { $ne: null }
+        }
+      },
+      {
+        $sort: { totalConsumed: -1, lastSeen: -1 }
+      }
+    ];
+
+    const users = await eventsCollection.aggregate(pipeline).toArray();
+    res.json({ users });
+  } catch (error) {
+    console.error("Credit consumption query failed:", error);
+    res.status(500).json({ error: "Failed to load credit consumption" });
+  }
+});
+
+app.get("/api/plugin-analytics/user-top-tools", readAuthGate, async (req, res) => {
+  try {
+    const eventsCollection = await getEventsCollection();
+    
+    const pipeline = [
+      {
+        $match: {
+          eventType: "tool_time_spent",
+          "payload.durationMs": { $type: "number" }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            user: {
+              $cond: [
+                { $eq: ["$user.isAuthenticated", true] },
+                "$user.userId",
+                "$user.anonymousId"
+              ]
+            },
+            tool: "$tool"
+          },
+          totalTimeMs: { $sum: "$payload.durationMs" },
+          name: { $first: "$user.name" },
+          email: { $first: "$user.email" }
+        }
+      },
+      {
+        $match: {
+          "_id.user": { $ne: null },
+          "_id.tool": { $ne: "unknown" }
+        }
+      },
+      {
+        $sort: { "_id.user": 1, totalTimeMs: -1 }
+      },
+      {
+        $group: {
+          _id: "$_id.user",
+          name: { $first: "$name" },
+          email: { $first: "$email" },
+          topTools: {
+            $push: {
+              tool: "$_id.tool",
+              timeSpentMs: "$totalTimeMs"
+            }
+          }
+        }
+      },
+      {
+        $project: {
+          name: 1,
+          email: 1,
+          topTools: { $slice: ["$topTools", 2] }
+        }
+      }
+    ];
+
+    const users = await eventsCollection.aggregate(pipeline).toArray();
+    res.json({ users });
+  } catch (error) {
+    console.error("User top tools query failed:", error);
+    res.status(500).json({ error: "Failed to load user top tools" });
+  }
+});
+
+app.get("/api/plugin-analytics/stats", async (req, res) => {
+  try {
+    const engagementCollection = await getEngagementCollection();
+    const stats = await engagementCollection.findOne({ _id: "global_stats" }) || {
+      likes: 0, saves: 0, follows: 0, installs: 0, reused: 0
+    };
+    
+    // Get MAU dynamically for the stats page
+    const eventsCollection = await getEventsCollection();
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const authMAU = await eventsCollection.distinct("user.userId", { eventAt: { $gte: thirtyDaysAgo }, "user.isAuthenticated": true });
+    const anonMAU = await eventsCollection.distinct("user.anonymousId", { eventAt: { $gte: thirtyDaysAgo }, "user.isAuthenticated": false });
+    
+    stats.mau = authMAU.length + anonMAU.length;
+    stats.installs = Math.max(stats.installs || 0, stats.mau); // Ensure installs >= MAU loosely
+
+    // Add deltas from yesterday's snapshot
+    const snapshotsCollection = await getSnapshotsCollection();
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const yesterdaySnap = await snapshotsCollection.findOne({ _id: yesterday });
+    if (yesterdaySnap) {
+      stats.deltas = {
+        mau: stats.mau - (yesterdaySnap.mau || 0),
+        likes: (stats.likes || 0) - (yesterdaySnap.likes || 0),
+        saves: (stats.saves || 0) - (yesterdaySnap.saves || 0),
+        follows: (stats.follows || 0) - (yesterdaySnap.follows || 0),
+        reuses: (stats.reused || 0) - (yesterdaySnap.reuses || 0),
+      };
+    } else {
+      stats.deltas = null;
+    }
+
+    res.json(stats);
+  } catch (error) {
+    console.error("Stats query failed:", error);
+    res.status(500).json({ error: "Failed to load stats" });
+  }
+});
+
+app.post("/api/plugin-analytics/stats/:action", async (req, res) => {
+  try {
+    const { action } = req.params;
+    const allowedActions = ["like", "save", "follow", "install", "reuse"];
+    if (!allowedActions.includes(action)) {
+      return res.status(400).json({ error: "Invalid action" });
+    }
+
+    const engagementCollection = await getEngagementCollection();
+    
+    const incrementField = action + "s";
+    const updateQuery = { $inc: { [incrementField]: 1 } };
+    
+    await engagementCollection.updateOne(
+      { _id: "global_stats" },
+      updateQuery,
+      { upsert: true }
+    );
+    
+    res.json({ success: true, action });
+  } catch (error) {
+    console.error("Stats update failed:", error);
+    res.status(500).json({ error: "Failed to update stats" });
+  }
+});
+
+app.get("/api/plugin-analytics/stats/history", readAuthGate, async (req, res) => {
+  try {
+    const snapshotsCollection = await getSnapshotsCollection();
+    const range = safeString(req.query.range, 10) || "90d";
+    const rangeMap = {
+      "7d": 7,
+      "30d": 30,
+      "90d": 90,
+      "180d": 180,
+      "365d": 365,
+    };
+    const days = rangeMap[range] || null;
+    const query = {};
+    if (days) {
+      query.date = { $gte: new Date(Date.now() - days * 24 * 60 * 60 * 1000) };
+    }
+    const snapshots = await snapshotsCollection
+      .find(query)
+      .sort({ date: 1 })
+      .toArray();
+    res.json(snapshots);
+  } catch (error) {
+    console.error("Stats history query failed:", error);
+    res.status(500).json({ error: "Failed to load stats history" });
+  }
+});
+
+app.get("/api/plugin-analytics/stats/deltas", readAuthGate, async (req, res) => {
+  try {
+    const snapshotsCollection = await getSnapshotsCollection();
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const yesterdayStr = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const lastWeekStr = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+    const [today, yesterday, lastWeek] = await Promise.all([
+      snapshotsCollection.findOne({ _id: todayStr }),
+      snapshotsCollection.findOne({ _id: yesterdayStr }),
+      snapshotsCollection.findOne({ _id: lastWeekStr }),
+    ]);
+
+    const metricKeys = ["mau", "authenticatedUsers", "likes", "saves", "follows", "reuses", "creditsConsumed", "activeSessions"];
+    function extractMetrics(snap) {
+      if (!snap) return null;
+      const out = {};
+      for (const key of metricKeys) {
+        out[key] = snap[key] || 0;
+      }
+      return out;
+    }
+
+    function computeChanges(current, previous) {
+      if (!current || !previous) return null;
+      const out = {};
+      for (const key of metricKeys) {
+        out[key] = (current[key] || 0) - (previous[key] || 0);
+      }
+      return out;
+    }
+
+    const todayMetrics = extractMetrics(today);
+    const yesterdayMetrics = extractMetrics(yesterday);
+    const lastWeekMetrics = extractMetrics(lastWeek);
+
+    res.json({
+      today: todayMetrics,
+      yesterday: yesterdayMetrics,
+      lastWeek: lastWeekMetrics,
+      changes: {
+        daily: computeChanges(todayMetrics, yesterdayMetrics),
+        weekly: computeChanges(todayMetrics, lastWeekMetrics),
+      },
+    });
+  } catch (error) {
+    console.error("Stats deltas query failed:", error);
+    res.status(500).json({ error: "Failed to load stats deltas" });
+  }
+});
+
+app.get("/api/plugin-analytics/credit-consumption/by-tool", readAuthGate, async (req, res) => {
+  try {
+    const eventsCollection = await getEventsCollection();
+    const tools = await eventsCollection
+      .aggregate([
+        { $match: { eventType: "credit_consumed" } },
+        {
+          $group: {
+            _id: "$tool",
+            count: { $sum: 1 },
+            totalAmount: {
+              $sum: {
+                $convert: {
+                  input: "$payload.amount",
+                  to: "double",
+                  onError: 1,
+                  onNull: 1,
+                },
+              },
+            },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            tool: "$_id",
+            count: 1,
+            totalAmount: { $round: ["$totalAmount", 2] },
+          },
+        },
+        { $sort: { count: -1 } },
+      ])
+      .toArray();
+    res.json({ tools });
+  } catch (error) {
+    console.error("Credit consumption by tool query failed:", error);
+    res.status(500).json({ error: "Failed to load credit consumption by tool" });
+  }
+});
+
+app.get("/api/plugin-analytics/retention", readAuthGate, async (req, res) => {
+  try {
+    const eventsCollection = await getEventsCollection();
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    // Find each user's first session date
+    const userFirstSeen = await eventsCollection
+      .aggregate([
+        {
+          $match: {
+            eventAt: { $gte: thirtyDaysAgo },
+            sessionId: { $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $cond: [
+                { $eq: ["$user.isAuthenticated", true] },
+                "$user.userId",
+                "$user.anonymousId",
+              ],
+            },
+            firstSeen: { $min: "$eventAt" },
+            allDates: {
+              $addToSet: {
+                $dateToString: { format: "%Y-%m-%d", date: "$eventAt" },
+              },
+            },
+          },
+        },
+        { $match: { _id: { $ne: null } } },
+      ])
+      .toArray();
+
+    // Group by first-seen date and compute retention
+    const cohortMap = new Map();
+    for (const user of userFirstSeen) {
+      const firstDate = new Date(user.firstSeen).toISOString().slice(0, 10);
+      if (!cohortMap.has(firstDate)) {
+        cohortMap.set(firstDate, { totalUsers: 0, day1: 0, day7: 0, day14: 0, day30: 0 });
+      }
+      const cohort = cohortMap.get(firstDate);
+      cohort.totalUsers += 1;
+
+      const firstMs = new Date(firstDate).getTime();
+      const dateSet = new Set(user.allDates);
+
+      for (const [dayLabel, dayOffset] of [["day1", 1], ["day7", 7], ["day14", 14], ["day30", 30]]) {
+        const targetDate = new Date(firstMs + dayOffset * 24 * 60 * 60 * 1000)
+          .toISOString()
+          .slice(0, 10);
+        if (dateSet.has(targetDate)) {
+          cohort[dayLabel] += 1;
+        }
+      }
+    }
+
+    const cohorts = Array.from(cohortMap.entries())
+      .map(([firstSeenDate, data]) => ({
+        firstSeenDate,
+        totalUsers: data.totalUsers,
+        day1: data.totalUsers > 0 ? Number((data.day1 / data.totalUsers).toFixed(4)) : 0,
+        day7: data.totalUsers > 0 ? Number((data.day7 / data.totalUsers).toFixed(4)) : 0,
+        day14: data.totalUsers > 0 ? Number((data.day14 / data.totalUsers).toFixed(4)) : 0,
+        day30: data.totalUsers > 0 ? Number((data.day30 / data.totalUsers).toFixed(4)) : 0,
+      }))
+      .sort((a, b) => a.firstSeenDate.localeCompare(b.firstSeenDate));
+
+    res.json({ cohorts });
+  } catch (error) {
+    console.error("Retention query failed:", error);
+    res.status(500).json({ error: "Failed to load retention data" });
   }
 });
 

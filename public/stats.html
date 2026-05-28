@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Waysorted Plugin Stats</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <style>
+      /* ── Plugin Info ────────────────────────────────── */
+      .stats-hero {
+        text-align: center;
+        margin: 32px 0 24px;
+      }
+      .stats-hero h1 {
+        font-size: 48px;
+        margin-bottom: 8px;
+        background: linear-gradient(135deg, var(--text) 40%, var(--accent));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+      .stats-hero .subtitle {
+        margin: 0 auto;
+        font-size: 16px;
+      }
+
+      /* ── Control Bar (range + mode) ─────────────────── */
+      .controls-bar {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        flex-wrap: wrap;
+        margin-bottom: 20px;
+      }
+      .range-group,
+      .mode-group {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(13, 22, 44, 0.8);
+        backdrop-filter: blur(8px);
+      }
+      .range-btn,
+      .mode-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 32px;
+        padding: 0 14px;
+        border-radius: 999px;
+        border: none;
+        color: #b5c5ee;
+        background: transparent;
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        cursor: pointer;
+        transition: all 150ms ease;
+      }
+      .range-btn:hover,
+      .mode-btn:hover {
+        color: #eaf1ff;
+        background: rgba(106, 146, 255, 0.14);
+      }
+      .range-btn.active,
+      .mode-btn.active {
+        color: #f5f8ff;
+        background: linear-gradient(145deg, rgba(93, 155, 255, 0.9), rgba(79, 128, 255, 0.92));
+        box-shadow: 0 6px 20px rgba(54, 104, 255, 0.35);
+      }
+
+      /* ── Metric Tabs ────────────────────────────────── */
+      .metric-tabs {
+        display: flex;
+        gap: 0;
+        overflow-x: auto;
+        margin-bottom: 16px;
+        border-bottom: 1px solid var(--line-soft);
+      }
+      .metric-tab {
+        flex: 1;
+        min-width: 100px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        padding: 14px 12px 12px;
+        border: none;
+        border-bottom: 2px solid transparent;
+        background: transparent;
+        color: var(--muted);
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: all 150ms ease;
+      }
+      .metric-tab:hover {
+        color: var(--text);
+        background: rgba(93, 155, 255, 0.06);
+      }
+      .metric-tab.active {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+      }
+      .metric-tab-value {
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        text-transform: none;
+        color: var(--text);
+      }
+      .metric-tab.active .metric-tab-value {
+        color: var(--accent);
+      }
+
+      /* ── Delta Badges ───────────────────────────────── */
+      .delta-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        border-radius: 999px;
+        padding: 2px 8px;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      .delta-up {
+        color: var(--good);
+        border: 1px solid rgba(47, 214, 161, 0.4);
+        background: rgba(47, 214, 161, 0.12);
+      }
+      .delta-down {
+        color: var(--bad);
+        border: 1px solid rgba(255, 107, 107, 0.4);
+        background: rgba(255, 107, 107, 0.12);
+      }
+      .delta-neutral {
+        color: var(--muted);
+        border: 1px solid rgba(142, 170, 240, 0.24);
+        background: rgba(120, 140, 187, 0.11);
+      }
+
+      /* ── Chart Card ─────────────────────────────────── */
+      .chart-card .chart-wrap {
+        height: clamp(280px, 40vh, 420px);
+        min-height: 280px;
+      }
+
+      /* ── Actions Row ────────────────────────────────── */
+      .actions-row {
+        display: flex;
+        justify-content: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin: 20px 0;
+      }
+      .action-btn {
+        background: rgba(13, 22, 44, 0.8);
+        border: 1px solid var(--line);
+        color: var(--text);
+        padding: 10px 20px;
+        border-radius: 12px;
+        font-family: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        transition: all 200ms ease;
+      }
+      .action-btn:hover {
+        background: rgba(106, 146, 255, 0.14);
+        border-color: rgba(111, 164, 255, 0.8);
+        transform: translateY(-1px);
+      }
+
+      /* ── KPI Grid overrides ─────────────────────────── */
+      .stats-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+        gap: 10px;
+        margin-bottom: 20px;
+      }
+      .stats-kpi-grid .kpi-card {
+        text-align: center;
+      }
+      .stats-kpi-grid .kpi-value {
+        font-size: 26px;
+      }
+      .stats-kpi-grid .kpi-sub {
+        margin-top: 6px;
+      }
+
+      /* ── Historical Table Card ──────────────────────── */
+      .history-table-wrap {
+        max-height: 520px;
+      }
+
+      /* ── No Data State ──────────────────────────────── */
+      .no-data {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 200px;
+        color: var(--muted);
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      /* ── Responsive ─────────────────────────────────── */
+      @media (max-width: 960px) {
+        .stats-hero h1 { font-size: 34px; }
+        .metric-tab { min-width: 70px; padding: 10px 8px 8px; }
+        .metric-tab-value { font-size: 18px; }
+        .controls-bar { gap: 10px; }
+      }
+      @media (max-width: 600px) {
+        .metric-tabs { gap: 0; }
+        .metric-tab { min-width: 55px; font-size: 10px; padding: 8px 4px 6px; }
+        .metric-tab-value { font-size: 15px; }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ── Navigation ────────────────────────────────── -->
+    <header class="page-header" style="justify-content: flex-end;">
+      <div class="header-actions">
+        <nav class="top-nav">
+          <a class="nav-link" href="/">Overview</a>
+          <a class="nav-link" href="/features.html">Feature Intelligence</a>
+          <a class="nav-link" href="/heatmap.html">Heatmap Lab</a>
+          <a class="nav-link" href="/credits.html">Credit Consumption</a>
+          <a class="nav-link active" href="/stats.html">Public Stats</a>
+        </nav>
+      </div>
+    </header>
+
+    <!-- ── Hero ──────────────────────────────────────── -->
+    <section class="stats-hero">
+      <p class="eyebrow">Public Dashboard</p>
+      <h1>Waysorted Plugin Suite</h1>
+      <p class="subtitle">Live analytics and community engagement</p>
+    </section>
+
+    <!-- ── KPI Summary Cards ─────────────────────────── -->
+    <section id="kpiGrid" class="stats-kpi-grid">
+      <!-- Rendered by stats.js -->
+    </section>
+
+    <!-- ── Controls: Range + Mode ────────────────────── -->
+    <div class="controls-bar">
+      <div class="range-group" id="rangeGroup">
+        <button class="range-btn" data-range="7d">7d</button>
+        <button class="range-btn" data-range="30d">30d</button>
+        <button class="range-btn active" data-range="90d">3m</button>
+        <button class="range-btn" data-range="180d">6m</button>
+        <button class="range-btn" data-range="365d">12m</button>
+        <button class="range-btn" data-range="all">All</button>
+      </div>
+      <div class="mode-group" id="modeGroup">
+        <button class="mode-btn active" data-mode="linear">Linear</button>
+        <button class="mode-btn" data-mode="cumulative">Cumulative</button>
+      </div>
+    </div>
+
+    <!-- ── Metric Tabs ───────────────────────────────── -->
+    <div class="metric-tabs" id="metricTabs">
+      <button class="metric-tab active" data-metric="mau">
+        <span class="metric-tab-value" id="tab-val-mau">--</span>
+        Users
+      </button>
+      <button class="metric-tab" data-metric="likes">
+        <span class="metric-tab-value" id="tab-val-likes">--</span>
+        Likes
+      </button>
+      <button class="metric-tab" data-metric="saves">
+        <span class="metric-tab-value" id="tab-val-saves">--</span>
+        Saves
+      </button>
+      <button class="metric-tab" data-metric="follows">
+        <span class="metric-tab-value" id="tab-val-follows">--</span>
+        Follows
+      </button>
+      <button class="metric-tab" data-metric="installs">
+        <span class="metric-tab-value" id="tab-val-installs">--</span>
+        Auths
+      </button>
+      <button class="metric-tab" data-metric="reused">
+        <span class="metric-tab-value" id="tab-val-reused">--</span>
+        Reused
+      </button>
+    </div>
+
+    <!-- ── Chart ─────────────────────────────────────── -->
+    <section class="card chart-card">
+      <div class="chart-wrap">
+        <canvas id="statsChart"></canvas>
+      </div>
+    </section>
+
+    <!-- ── Action Buttons ────────────────────────────── -->
+    <div class="actions-row">
+      <button class="action-btn" data-action="like">Like Plugin</button>
+      <button class="action-btn" data-action="save">Save</button>
+      <button class="action-btn" data-action="follow">Follow</button>
+    </div>
+
+    <!-- ── Historical Data Table ─────────────────────── -->
+    <section class="card" style="margin-top: 4px;">
+      <h2>Historical Data</h2>
+      <div class="table-wrap history-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Users</th>
+              <th>Likes</th>
+              <th>Saves</th>
+              <th>Follows</th>
+              <th>Auths</th>
+              <th>Reused</th>
+            </tr>
+          </thead>
+          <tbody id="historyBody">
+            <!-- Rendered by stats.js -->
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <p id="statusLine" class="status" style="text-align: center;">Loading stats...</p>
+
+    <script src="/stats.js"></script>
+  </body>
+</html>
