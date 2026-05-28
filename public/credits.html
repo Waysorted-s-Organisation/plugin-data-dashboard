@@ -67,15 +67,15 @@
         </p>
       </div>
       <div class="header-actions">
-        <nav class="top-nav">
+        <nav class="top-nav" aria-label="Main Navigation">
           <a class="nav-link" href="/">Overview</a>
           <a class="nav-link" href="/features.html">Feature Intelligence</a>
           <a class="nav-link" href="/heatmap.html">Heatmap Lab</a>
-          <a class="nav-link active" href="/credits.html">Credit Consumption</a>
+          <a class="nav-link active" href="/credits.html" aria-current="page">Credit Consumption</a>
           <a class="nav-link" href="/stats.html">Public Stats</a>
         </nav>
-        <button id="exportBtn" class="export-btn">Export CSV</button>
-        <button id="refreshBtn" class="primary-btn">Refresh</button>
+        <button id="exportBtn" class="export-btn" aria-label="Export data to CSV">Export CSV</button>
+        <button id="refreshBtn" class="primary-btn" aria-label="Refresh data">Refresh</button>
       </div>
     </header>
 
@@ -104,18 +104,19 @@
           class="search-input"
           type="text"
           placeholder="Search by name or email..."
+          aria-label="Search by name or email"
         />
       </div>
       <div class="table-wrap" style="max-height: 600px;">
         <table>
           <thead>
             <tr>
-              <th>User</th>
-              <th class="sortable" data-sort="creditsRemaining">Available Credits <span class="sort-indicator"></span></th>
-              <th class="sortable" data-sort="totalConsumed">Credits Consumed <span class="sort-indicator"></span></th>
-              <th>Top Tools</th>
-              <th class="sortable" data-sort="lastSeen">Last Active <span class="sort-indicator"></span></th>
-              <th class="sortable" data-sort="depletion">Projected Depletion <span class="sort-indicator"></span></th>
+              <th scope="col">User</th>
+              <th scope="col" class="sortable" data-sort="creditsRemaining" aria-label="Sort by Available Credits">Available Credits <span class="sort-indicator"></span></th>
+              <th scope="col" class="sortable" data-sort="totalConsumed" aria-label="Sort by Credits Consumed">Credits Consumed <span class="sort-indicator"></span></th>
+              <th scope="col">Top Tools</th>
+              <th scope="col" class="sortable" data-sort="lastSeen" aria-label="Sort by Last Active">Last Active <span class="sort-indicator"></span></th>
+              <th scope="col" class="sortable" data-sort="depletion" aria-label="Sort by Projected Depletion">Projected Depletion <span class="sort-indicator"></span></th>
             </tr>
           </thead>
           <tbody id="usersBody"></tbody>

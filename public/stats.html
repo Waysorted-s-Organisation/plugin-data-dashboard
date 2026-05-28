@@ -241,12 +241,12 @@
     <!-- ── Navigation ────────────────────────────────── -->
     <header class="page-header" style="justify-content: flex-end;">
       <div class="header-actions">
-        <nav class="top-nav">
+        <nav class="top-nav" aria-label="Main Navigation">
           <a class="nav-link" href="/">Overview</a>
           <a class="nav-link" href="/features.html">Feature Intelligence</a>
           <a class="nav-link" href="/heatmap.html">Heatmap Lab</a>
           <a class="nav-link" href="/credits.html">Credit Consumption</a>
-          <a class="nav-link active" href="/stats.html">Public Stats</a>
+          <a class="nav-link active" href="/stats.html" aria-current="page">Public Stats</a>
         </nav>
       </div>
     </header>
@@ -264,44 +264,44 @@
     </section>
 
     <!-- ── Controls: Range + Mode ────────────────────── -->
-    <div class="controls-bar">
-      <div class="range-group" id="rangeGroup">
-        <button class="range-btn" data-range="7d">7d</button>
-        <button class="range-btn" data-range="30d">30d</button>
-        <button class="range-btn active" data-range="90d">3m</button>
-        <button class="range-btn" data-range="180d">6m</button>
-        <button class="range-btn" data-range="365d">12m</button>
-        <button class="range-btn" data-range="all">All</button>
+    <div class="controls-bar" role="toolbar" aria-label="Chart Controls">
+      <div class="range-group" id="rangeGroup" role="group" aria-label="Time Range">
+        <button class="range-btn" data-range="7d" aria-label="7 days">7d</button>
+        <button class="range-btn" data-range="30d" aria-label="30 days">30d</button>
+        <button class="range-btn active" data-range="90d" aria-label="3 months">3m</button>
+        <button class="range-btn" data-range="180d" aria-label="6 months">6m</button>
+        <button class="range-btn" data-range="365d" aria-label="12 months">12m</button>
+        <button class="range-btn" data-range="all" aria-label="All time">All</button>
       </div>
-      <div class="mode-group" id="modeGroup">
-        <button class="mode-btn active" data-mode="linear">Linear</button>
-        <button class="mode-btn" data-mode="cumulative">Cumulative</button>
+      <div class="mode-group" id="modeGroup" role="group" aria-label="Chart Mode">
+        <button class="mode-btn active" data-mode="linear" aria-label="Linear scale">Linear</button>
+        <button class="mode-btn" data-mode="cumulative" aria-label="Cumulative scale">Cumulative</button>
       </div>
     </div>
 
     <!-- ── Metric Tabs ───────────────────────────────── -->
-    <div class="metric-tabs" id="metricTabs">
-      <button class="metric-tab active" data-metric="mau">
+    <div class="metric-tabs" id="metricTabs" role="tablist" aria-label="Metric Selection">
+      <button class="metric-tab active" data-metric="mau" role="tab" aria-selected="true" aria-controls="statsChart">
         <span class="metric-tab-value" id="tab-val-mau">--</span>
         Users
       </button>
-      <button class="metric-tab" data-metric="likes">
+      <button class="metric-tab" data-metric="likes" role="tab" aria-selected="false" aria-controls="statsChart">
         <span class="metric-tab-value" id="tab-val-likes">--</span>
         Likes
       </button>
-      <button class="metric-tab" data-metric="saves">
+      <button class="metric-tab" data-metric="saves" role="tab" aria-selected="false" aria-controls="statsChart">
         <span class="metric-tab-value" id="tab-val-saves">--</span>
         Saves
       </button>
-      <button class="metric-tab" data-metric="follows">
+      <button class="metric-tab" data-metric="follows" role="tab" aria-selected="false" aria-controls="statsChart">
         <span class="metric-tab-value" id="tab-val-follows">--</span>
         Follows
       </button>
-      <button class="metric-tab" data-metric="installs">
+      <button class="metric-tab" data-metric="installs" role="tab" aria-selected="false" aria-controls="statsChart">
         <span class="metric-tab-value" id="tab-val-installs">--</span>
         Auths
       </button>
-      <button class="metric-tab" data-metric="reused">
+      <button class="metric-tab" data-metric="reused" role="tab" aria-selected="false" aria-controls="statsChart">
         <span class="metric-tab-value" id="tab-val-reused">--</span>
         Reused
       </button>

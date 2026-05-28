@@ -8,7 +8,7 @@
   --line: rgba(156, 182, 255, 0.22);
   --line-soft: rgba(156, 182, 255, 0.12);
   --text: #ecf2ff;
-  --muted: #9eadd6;
+  --muted: #b5c5ee;
   --accent: #5d9bff;
   --accent-2: #78e6d8;
   --good: #2fd6a1;
@@ -19,6 +19,12 @@
 
 * {
   box-sizing: border-box;
+}
+
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 html,
@@ -87,6 +93,12 @@ h1 {
   border: 1px solid var(--line);
   background: rgba(13, 22, 44, 0.8);
   backdrop-filter: blur(8px);
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.top-nav::-webkit-scrollbar {
+  display: none;
 }
 
 .nav-link {
@@ -581,11 +593,11 @@ tbody tr:nth-child(2n) {
 
   .top-nav {
     width: 100%;
-    justify-content: space-between;
+    justify-content: flex-start;
   }
 
   .nav-link {
-    flex: 1;
+    flex: 0 0 auto;
   }
 
   #heatmapCanvas,
@@ -600,5 +612,16 @@ tbody tr:nth-child(2n) {
   .action-table-wrap {
     height: 320px;
     max-height: 320px;
+  }
+}
+
+@media (max-width: 480px) {
+  .kpi-grid,
+  .insights-grid {
+    grid-template-columns: repeat(2, minmax(130px, 1fr));
+  }
+  
+  .kpi-value {
+    font-size: 24px;
   }
 }
