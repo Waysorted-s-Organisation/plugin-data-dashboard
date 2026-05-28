@@ -99,8 +99,123 @@ test("Dashboard APIs", async (t) => {
     assert.strictEqual(getRes.body.likes, 1);
   });
 
+  await t.test("GET /api/plugin-analytics/stats/history", async () => {
+    const snapshotsColl = db.collection("stats_snapshots");
+    await snapshotsColl.deleteMany({});
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const yesterdayStr = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    
+    await snapshotsColl.insertMany([
+      {
+        _id: todayStr,
+        date: new Date(todayStr),
+        mau: 10,
+        authenticatedUsers: 5,
+        likes: 12,
+        saves: 8,
+        follows: 4,
+        reuses: 20,
+        creditsConsumed: 50,
+        activeSessions: 3,
+        recordedAt: new Date()
+      },
+      {
+        _id: yesterdayStr,
+        date: new Date(yesterdayStr),
+        mau: 8,
+        authenticatedUsers: 4,
+        likes: 10,
+        saves: 7,
+        follows: 3,
+        reuses: 18,
+        creditsConsumed: 45,
+        activeSessions: 2,
+        recordedAt: new Date()
+      }
+    ]);
+
+    const res = await request(app)
+      .get("/api/plugin-analytics/stats/history?range=7d")
+      .set("Authorization", authString);
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.body.length, 2);
+    assert.strictEqual(res.body[0]._id, yesterdayStr);
+    assert.strictEqual(res.body[1]._id, todayStr);
+  });
+
+  await t.test("GET /api/plugin-analytics/stats/deltas", async () => {
+    const res = await request(app)
+      .get("/api/plugin-analytics/stats/deltas")
+      .set("Authorization", authString);
+
+    assert.strictEqual(res.status, 200);
+    assert.ok(res.body.today);
+    assert.ok(res.body.yesterday);
+    assert.strictEqual(res.body.today.mau, 10);
+    assert.strictEqual(res.body.yesterday.mau, 8);
+    assert.strictEqual(res.body.changes.daily.mau, 2); // 10 - 8
+    assert.strictEqual(res.body.changes.daily.likes, 2); // 12 - 10
+  });
+
+  await t.test("GET /api/plugin-analytics/credit-consumption/by-tool", async () => {
+    const res = await request(app)
+      .get("/api/plugin-analytics/credit-consumption/by-tool")
+      .set("Authorization", authString);
+
+    assert.strictEqual(res.status, 200);
+    assert.ok(res.body.tools);
+    assert.strictEqual(res.body.tools.length, 1);
+    assert.strictEqual(res.body.tools[0].tool, "import-tool");
+    assert.strictEqual(res.body.tools[0].count, 1);
+  });
+
+  await t.test("GET /api/plugin-analytics/retention", async () => {
+    // Add retention events
+    const firstDate = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000); // 15 days ago
+    const day1Date = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000); // 14 days ago (Day 1)
+    
+    await eventsColl.insertMany([
+      {
+        eventType: "session_start",
+        eventAt: firstDate,
+        sessionId: "session-2",
+        user: {
+          isAuthenticated: true,
+          userId: "user2",
+          name: "Bob"
+        }
+      },
+      {
+        eventType: "interaction",
+        eventAt: day1Date,
+        sessionId: "session-3",
+        user: {
+          isAuthenticated: true,
+          userId: "user2",
+          name: "Bob"
+        }
+      }
+    ]);
+
+    const res = await request(app)
+      .get("/api/plugin-analytics/retention")
+      .set("Authorization", authString);
+
+    assert.strictEqual(res.status, 200);
+    assert.ok(res.body.cohorts);
+    const firstDateStr = firstDate.toISOString().slice(0, 10);
+    const matchingCohort = res.body.cohorts.find(c => c.firstSeenDate === firstDateStr);
+    assert.ok(matchingCohort);
+    assert.strictEqual(matchingCohort.totalUsers, 1);
+    assert.strictEqual(matchingCohort.day1, 1.0);
+  });
+
   // Cleanup
+  const snapshotsColl = db.collection("stats_snapshots");
   await eventsColl.deleteMany({});
   await engageColl.deleteMany({});
+  await snapshotsColl.deleteMany({});
   await mongod.stop();
 });

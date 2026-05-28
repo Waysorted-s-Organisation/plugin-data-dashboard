@@ -77,8 +77,14 @@ export async function getEngagementCollection() {
   return db.collection("plugin_engagement");
 }
 
+export async function getSnapshotsCollection() {
+  const db = await getDb();
+  return db.collection("stats_snapshots");
+}
+
 export async function ensureIndexes() {
   const events = await getEventsCollection();
+  const snapshots = await getSnapshotsCollection();
 
   await Promise.all([
     events.createIndex({ eventAt: -1 }),
@@ -92,5 +98,7 @@ export async function ensureIndexes() {
     events.createIndex({ "user.userId": 1, eventAt: -1 }),
     events.createIndex({ "user.anonymousId": 1, eventAt: -1 }),
     events.createIndex({ source: 1, eventAt: -1 }),
+    snapshots.createIndex({ date: -1 }),
+    snapshots.createIndex({ date: 1 }, { unique: true }),
   ]);
 }
