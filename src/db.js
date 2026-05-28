@@ -72,6 +72,11 @@ export async function getEventsCollection() {
   return db.collection("plugin_analytics_events");
 }
 
+export async function getEngagementCollection() {
+  const db = await getDb();
+  return db.collection("plugin_engagement");
+}
+
 export async function ensureIndexes() {
   const events = await getEventsCollection();
 

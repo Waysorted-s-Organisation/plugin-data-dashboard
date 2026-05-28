@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Credit Consumption Tracker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Plugin Analytics</p>
+        <h1>Credit Consumption Tracker</h1>
+        <p class="subtitle">
+          Monitor user credit balances, track credit spend, and identify heavy tool users in real-time.
+        </p>
+      </div>
+      <div class="header-actions">
+        <nav class="top-nav">
+          <a class="nav-link" href="/">Overview</a>
+          <a class="nav-link" href="/features.html">Feature Intelligence</a>
+          <a class="nav-link" href="/heatmap.html">Heatmap Lab</a>
+          <a class="nav-link active" href="/credits.html">Credit Consumption</a>
+          <a class="nav-link" href="/stats.html">Public Stats</a>
+        </nav>
+        <button id="refreshBtn" class="primary-btn">Refresh</button>
+      </div>
+    </header>
+
+    <section id="kpiGrid" class="kpi-grid"></section>
+
+    <section class="card">
+      <h2>User Credits Overview</h2>
+      <div class="table-wrap" style="max-height: 600px;">
+        <table>
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Available Credits</th>
+              <th>Credits Consumed</th>
+              <th>Top Tools</th>
+              <th>Last Active</th>
+            </tr>
+          </thead>
+          <tbody id="usersBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <p id="statusLine" class="status">Loading…</p>
+
+    <script type="module" src="/credits.js"></script>
+  </body>
+</html>

@@ -7,7 +7,7 @@ import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 
-import { ensureIndexes, getEventsCollection } from "./db.js";
+import { ensureIndexes, getEventsCollection, getEngagementCollection } from "./db.js";
 
 dotenv.config();
 
@@ -2101,6 +2101,207 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
   } catch (error) {
     console.error("Dashboard query failed:", error);
     return res.status(500).json({ error: "Failed to load dashboard" });
+  }
+});
+
+app.get("/api/plugin-analytics/mau", readAuthGate, async (req, res) => {
+  try {
+    const eventsCollection = await getEventsCollection();
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    
+    const [authMAU, anonMAU] = await Promise.all([
+      eventsCollection.distinct("user.userId", {
+        eventAt: { $gte: thirtyDaysAgo },
+        "user.isAuthenticated": true,
+        "user.userId": { $ne: null }
+      }),
+      eventsCollection.distinct("user.anonymousId", {
+        eventAt: { $gte: thirtyDaysAgo },
+        "user.isAuthenticated": false,
+        "user.anonymousId": { $ne: null }
+      })
+    ]);
+
+    res.json({
+      mau: authMAU.length + anonMAU.length,
+      authenticated: authMAU.length,
+      anonymous: anonMAU.length,
+      since: thirtyDaysAgo.toISOString()
+    });
+  } catch (error) {
+    console.error("MAU query failed:", error);
+    res.status(500).json({ error: "Failed to load MAU" });
+  }
+});
+
+app.get("/api/plugin-analytics/credit-consumption", readAuthGate, async (req, res) => {
+  try {
+    const eventsCollection = await getEventsCollection();
+    
+    // Aggregate credit consumptions and get latest credits remaining per user
+    const pipeline = [
+      {
+        $match: {
+          $or: [
+            { eventType: "credit_consumed" },
+            { "user.creditsRemaining": { $exists: true, $ne: null } }
+          ]
+        }
+      },
+      {
+        $sort: { eventAt: -1 }
+      },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              { $eq: ["$user.isAuthenticated", true] },
+              "$user.userId",
+              "$user.anonymousId"
+            ]
+          },
+          name: { $first: "$user.name" },
+          email: { $first: "$user.email" },
+          creditsRemaining: { $first: "$user.creditsRemaining" },
+          totalConsumed: {
+            $sum: {
+              $cond: [{ $eq: ["$eventType", "credit_consumed"] }, 1, 0]
+            }
+          },
+          lastSeen: { $first: "$eventAt" }
+        }
+      },
+      {
+        $match: {
+          _id: { $ne: null }
+        }
+      },
+      {
+        $sort: { totalConsumed: -1, lastSeen: -1 }
+      }
+    ];
+
+    const users = await eventsCollection.aggregate(pipeline).toArray();
+    res.json({ users });
+  } catch (error) {
+    console.error("Credit consumption query failed:", error);
+    res.status(500).json({ error: "Failed to load credit consumption" });
+  }
+});
+
+app.get("/api/plugin-analytics/user-top-tools", readAuthGate, async (req, res) => {
+  try {
+    const eventsCollection = await getEventsCollection();
+    
+    const pipeline = [
+      {
+        $match: {
+          eventType: "tool_time_spent",
+          "payload.durationMs": { $type: "number" }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            user: {
+              $cond: [
+                { $eq: ["$user.isAuthenticated", true] },
+                "$user.userId",
+                "$user.anonymousId"
+              ]
+            },
+            tool: "$tool"
+          },
+          totalTimeMs: { $sum: "$payload.durationMs" },
+          name: { $first: "$user.name" },
+          email: { $first: "$user.email" }
+        }
+      },
+      {
+        $match: {
+          "_id.user": { $ne: null },
+          "_id.tool": { $ne: "unknown" }
+        }
+      },
+      {
+        $sort: { "_id.user": 1, totalTimeMs: -1 }
+      },
+      {
+        $group: {
+          _id: "$_id.user",
+          name: { $first: "$name" },
+          email: { $first: "$email" },
+          topTools: {
+            $push: {
+              tool: "$_id.tool",
+              timeSpentMs: "$totalTimeMs"
+            }
+          }
+        }
+      },
+      {
+        $project: {
+          name: 1,
+          email: 1,
+          topTools: { $slice: ["$topTools", 2] }
+        }
+      }
+    ];
+
+    const users = await eventsCollection.aggregate(pipeline).toArray();
+    res.json({ users });
+  } catch (error) {
+    console.error("User top tools query failed:", error);
+    res.status(500).json({ error: "Failed to load user top tools" });
+  }
+});
+
+app.get("/api/plugin-analytics/stats", async (req, res) => {
+  try {
+    const engagementCollection = await getEngagementCollection();
+    const stats = await engagementCollection.findOne({ _id: "global_stats" }) || {
+      likes: 0, saves: 0, follows: 0, installs: 0, reused: 0
+    };
+    
+    // Get MAU dynamically for the stats page
+    const eventsCollection = await getEventsCollection();
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const authMAU = await eventsCollection.distinct("user.userId", { eventAt: { $gte: thirtyDaysAgo }, "user.isAuthenticated": true });
+    const anonMAU = await eventsCollection.distinct("user.anonymousId", { eventAt: { $gte: thirtyDaysAgo }, "user.isAuthenticated": false });
+    
+    stats.mau = authMAU.length + anonMAU.length;
+    stats.installs = Math.max(stats.installs || 0, stats.mau); // Ensure installs >= MAU loosely
+
+    res.json(stats);
+  } catch (error) {
+    console.error("Stats query failed:", error);
+    res.status(500).json({ error: "Failed to load stats" });
+  }
+});
+
+app.post("/api/plugin-analytics/stats/:action", async (req, res) => {
+  try {
+    const { action } = req.params;
+    const allowedActions = ["like", "save", "follow", "install", "reuse"];
+    if (!allowedActions.includes(action)) {
+      return res.status(400).json({ error: "Invalid action" });
+    }
+
+    const engagementCollection = await getEngagementCollection();
+    
+    const incrementField = action + "s";
+    const updateQuery = { $inc: { [incrementField]: 1 } };
+    
+    await engagementCollection.updateOne(
+      { _id: "global_stats" },
+      updateQuery,
+      { upsert: true }
+    );
+    
+    res.json({ success: true, action });
+  } catch (error) {
+    console.error("Stats update failed:", error);
+    res.status(500).json({ error: "Failed to update stats" });
   }
 });
 
