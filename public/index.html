@@ -27,7 +27,7 @@
           <a class="nav-link active" href="/" aria-current="page">Overview</a>
           <a class="nav-link" href="/features.html">Feature Intelligence</a>
           <a class="nav-link" href="/heatmap.html">Heatmap Lab</a>
-          <a class="nav-link" href="/credits.html">Credit Consumption</a>
+          <a class="nav-link" href="/credits.html">Credit Intelligence</a>
           <a class="nav-link" href="/stats.html">Public Stats</a>
         </nav>
         <button id="refreshBtn" class="primary-btn" aria-label="Refresh data">Refresh</button>
@@ -99,72 +99,78 @@
       </article>
     </section>
 
-    <section class="card-grid two-up">
-      <article class="card heatmap-card">
-        <div class="card-title-row">
-          <h2>Click Heatmap (Overview)</h2>
-          <span id="heatmapCount" class="muted"></span>
-        </div>
-        <div class="heatmap-wrap">
-          <canvas id="heatmapCanvas"></canvas>
-        </div>
-      </article>
-      <article class="card action-card">
-        <h2>Action Intelligence</h2>
-        <div class="table-wrap action-table-wrap">
+    <details class="details-card">
+      <summary>Detailed Interaction Explorer</summary>
+      <section class="card-grid two-up details-section">
+        <article class="card heatmap-card">
+          <div class="card-title-row">
+            <h2>Click Heatmap (Overview)</h2>
+            <span id="heatmapCount" class="muted"></span>
+          </div>
+          <div class="heatmap-wrap">
+            <canvas id="heatmapCanvas"></canvas>
+          </div>
+        </article>
+        <article class="card action-card">
+          <h2>Action Intelligence</h2>
+          <div class="table-wrap action-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Event</th>
+                  <th>Meaning</th>
+                  <th>Category</th>
+                  <th>Count</th>
+                  <th>Share</th>
+                </tr>
+              </thead>
+              <tbody id="actionsBody"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+    </details>
+
+    <details class="details-card">
+      <summary>Session And Event Logs</summary>
+      <section class="card details-section">
+        <h2>Session Quality</h2>
+        <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Event</th>
-                <th>Meaning</th>
-                <th>Category</th>
-                <th>Count</th>
-                <th>Share</th>
+                <th>Session</th>
+                <th>User</th>
+                <th>Duration</th>
+                <th>Active Actions</th>
+                <th>Tools Used</th>
+                <th>Last Seen</th>
               </tr>
             </thead>
-            <tbody id="actionsBody"></tbody>
+            <tbody id="sessionsBody"></tbody>
           </table>
         </div>
-      </article>
-    </section>
+      </section>
 
-    <section class="card">
-      <h2>Session Quality</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Session</th>
-              <th>User</th>
-              <th>Duration</th>
-              <th>Active Actions</th>
-              <th>Tools Used</th>
-              <th>Last Seen</th>
-            </tr>
-          </thead>
-          <tbody id="sessionsBody"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>Recent Event Timeline</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>What Happened</th>
-              <th>Tool</th>
-              <th>Value Signal</th>
-              <th>User</th>
-              <th>Session</th>
-            </tr>
-          </thead>
-          <tbody id="eventsBody"></tbody>
-        </table>
-      </div>
-    </section>
+      <section class="card details-section">
+        <h2>Recent Event Timeline</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>What Happened</th>
+                <th>Tool</th>
+                <th>Value Signal</th>
+                <th>User</th>
+                <th>Session</th>
+              </tr>
+            </thead>
+            <tbody id="eventsBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </details>
 
     <p id="statusLine" class="status">Loading…</p>
 

@@ -63,6 +63,15 @@ const TOOL_LABELS = {
   system: "System",
 }
 
+const INTERNAL_TOOL_SET = new Set([
+  "dashboard",
+  "collapsed-dashboard",
+  "profile",
+  "unknown",
+  "unattributed",
+  "system",
+])
+
 const EVENT_METADATA = {
   plugin_session_started: {
     label: "Session Started",
@@ -750,8 +759,11 @@ function durationLabel(ms) {
   return `${hours}h ${remMinutes}m`
 }
 
-function numberLabel(value) {
-  return new Intl.NumberFormat().format(Number(value || 0))
+function numberLabel(value, digits = 0) {
+  return new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: digits,
+  }).format(Number(value || 0))
 }
 
 function percentLabel(value, digits = 1) {
@@ -777,6 +789,10 @@ function labelTool(toolId) {
   if (!key) return "Unknown Tool"
   if (TOOL_LABELS[key]) return TOOL_LABELS[key]
   return humanizeIdentifier(key)
+}
+
+function isInternalTool(toolId) {
+  return INTERNAL_TOOL_SET.has(normalizeKey(toolId))
 }
 
 function getEventMeta(eventKey) {
@@ -1255,15 +1271,24 @@ function buildDerivedAnalysis(dashboard) {
     .filter((row) => !row.meta.passive)
     .sort((a, b) => b.count - a.count)[0] || null
 
-  const topTool = sortedTools[0] || null
+  const visibleTools = sortedTools.filter((toolRow) => !isInternalTool(toolRow.tool))
+  const topTool = visibleTools[0] || sortedTools[0] || null
   const topToolShare = topTool && meaningfulEvents > 0
     ? topTool.activeEventCount / meaningfulEvents
     : 0
-  const activeToolCount = sortedTools.filter((toolRow) => toolRow.activeEventCount > 0).length
+  const activeToolCount = visibleTools.filter((toolRow) => toolRow.activeEventCount > 0).length
   const authenticatedUsers = Number(kpis.authenticatedUsers || 0)
   const anonymousUsers = Number(kpis.anonymousUsers || 0)
   const totalUsers = authenticatedUsers + anonymousUsers
   const authenticatedShare = totalUsers > 0 ? authenticatedUsers / totalUsers : 0
+  const creditSummary = dashboard.creditIntelligence && dashboard.creditIntelligence.summary
+    ? dashboard.creditIntelligence.summary
+    : {}
+  const publicStats = dashboard.publicStats || {}
+  const topPowerUser = dashboard.creditIntelligence &&
+    Array.isArray(dashboard.creditIntelligence.topPowerUsers)
+    ? dashboard.creditIntelligence.topPowerUsers[0] || null
+    : null
 
   return {
     totalEvents,
@@ -1281,6 +1306,14 @@ function buildDerivedAnalysis(dashboard) {
     authenticatedUsers,
     anonymousUsers,
     authenticatedShare,
+    publicMau: Number(publicStats.mau || 0),
+    publicFollows: Number(publicStats.follows || 0),
+    publicReused: Number(publicStats.reused || 0),
+    lowCreditUsers: Number(creditSummary.lowCreditUsers || 0),
+    runoutSoonUsers: Number(creditSummary.runoutSoonUsers || 0),
+    creditsConsumedTotal: Number(creditSummary.creditsConsumedTotal || 0),
+    creditsRemainingTotal: Number(creditSummary.creditsRemainingTotal || 0),
+    topPowerUser,
   }
 }
 
@@ -1305,8 +1338,12 @@ function getQueryParams() {
   return params
 }
 
+function resolveApiPath(path) {
+  return new URL(path, `${window.location.protocol}//${window.location.host}`).toString()
+}
+
 async function fetchJson(path, options = {}) {
-  const response = await fetch(path, options)
+  const response = await fetch(resolveApiPath(path), options)
   if (!response.ok) {
     const text = await response.text()
     throw new Error(`${response.status} ${response.statusText} - ${text}`)
@@ -1370,6 +1407,23 @@ function renderKpis(kpis, analysis) {
       sub: "Meaningful actions from #1 workflow",
       tone: analysis.topToolShare > 0.6 ? "warn" : "neutral",
     },
+    {
+      label: "Current MAU",
+      value: numberLabel(analysis.publicMau),
+      sub: `${numberLabel(analysis.publicFollows)} follows • ${numberLabel(analysis.publicReused)} reused`,
+      tone: analysis.publicMau > 0 ? "good" : "neutral",
+    },
+    {
+      label: "Runout Soon",
+      value: numberLabel(analysis.runoutSoonUsers),
+      sub: `${numberLabel(analysis.lowCreditUsers)} already low on credits`,
+      tone: analysis.runoutSoonUsers > 0 ? "warn" : "good",
+    },
+    {
+      label: "Credits Left",
+      value: numberLabel(analysis.creditsRemainingTotal),
+      sub: `${numberLabel(analysis.creditsConsumedTotal)} consumed`,
+    },
   ]
 
   kpiGrid.innerHTML = cards
@@ -1419,6 +1473,15 @@ function renderInsights(analysis) {
     value: analysis.anonymousUsers > 0 ? `${numberLabel(analysis.anonymousUsers)} identified users` : "No anon identifiers yet",
     text: "Anonymous users are shown as pseudonymous IDs when available from runtime context.",
   })
+
+  if (analysis.topPowerUser) {
+    cards.push({
+      tone: "neutral",
+      title: "Power User",
+      value: analysis.topPowerUser.name || analysis.topPowerUser.email || analysis.topPowerUser._id,
+      text: `${numberLabel((analysis.topPowerUser.totalTimeSpentMs || 0) / 60000, 1)} min spent across top tools.`,
+    })
+  }
 
   insightsGrid.innerHTML = cards
     .map(
@@ -1558,10 +1621,12 @@ function renderToolChart(tools) {
       const value = state.includeSystemEvents ? eventCount : activeEventCount
 
       return {
+        tool: toolRow.tool,
         label: labelTool(toolRow.tool),
         value,
       }
     })
+    .filter((row) => state.includeSystemEvents || !isInternalTool(row.tool))
     .filter((row) => row.value > 0)
     .sort((a, b) => b.value - a.value)
     .slice(0, 10)

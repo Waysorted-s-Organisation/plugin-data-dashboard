@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Credit Consumption Tracker</title>
+    <title>Credit Intelligence</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -11,59 +11,15 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/styles.css" />
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
-    <style>
-      .sortable { cursor: pointer; user-select: none; }
-      .sortable:hover { color: var(--accent); }
-      .sort-indicator { font-size: 10px; margin-left: 4px; opacity: 0.7; }
-      .search-input {
-        max-width: 320px;
-        margin-bottom: 0;
-      }
-      .table-toolbar {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        margin-bottom: 10px;
-        flex-wrap: wrap;
-      }
-      .depletion-estimate {
-        font-size: 11px;
-        color: var(--warn);
-        margin-top: 2px;
-      }
-      .depletion-safe {
-        color: var(--good);
-      }
-      .depletion-danger {
-        color: var(--bad);
-      }
-      .export-btn {
-        border: 1px solid var(--line);
-        background: var(--panel-2);
-        color: var(--text);
-        font-weight: 700;
-        padding: 10px 16px;
-        border-radius: 10px;
-        cursor: pointer;
-        font-family: inherit;
-        font-size: 13px;
-        transition: transform 120ms ease, border-color 120ms ease;
-      }
-      .export-btn:hover {
-        transform: translateY(-1px);
-        border-color: var(--accent);
-      }
-    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   </head>
   <body>
     <header class="page-header">
       <div>
         <p class="eyebrow">Plugin Analytics</p>
-        <h1>Credit Consumption Tracker</h1>
+        <h1>Credit Intelligence</h1>
         <p class="subtitle">
-          Monitor user credit balances, track credit spend, and identify heavy tool users in real-time.
+          Track balances, identify runout risk, see where credits are being burned, and prepare the credit newsletter from one place.
         </p>
       </div>
       <div class="header-actions">
@@ -71,52 +27,96 @@
           <a class="nav-link" href="/">Overview</a>
           <a class="nav-link" href="/features.html">Feature Intelligence</a>
           <a class="nav-link" href="/heatmap.html">Heatmap Lab</a>
-          <a class="nav-link active" href="/credits.html" aria-current="page">Credit Consumption</a>
+          <a class="nav-link active" href="/credits.html" aria-current="page">Credit Intelligence</a>
           <a class="nav-link" href="/stats.html">Public Stats</a>
         </nav>
-        <button id="exportBtn" class="export-btn" aria-label="Export data to CSV">Export CSV</button>
-        <button id="refreshBtn" class="primary-btn" aria-label="Refresh data">Refresh</button>
+        <button id="exportBtn" class="secondary-btn" type="button">Export CSV</button>
+        <button id="sendNewsletterBtn" class="secondary-btn" type="button">Send Digest</button>
+        <button id="refreshBtn" class="primary-btn" type="button">Refresh</button>
       </div>
     </header>
 
-    <section id="kpiGrid" class="kpi-grid"></section>
+    <section id="summaryGrid" class="kpi-grid kpi-grid-8"></section>
+    <section id="creditSourceStrip" class="source-strip"></section>
 
-    <section class="card-grid two-up" style="margin-bottom: 12px;">
+    <section class="card-grid two-up">
       <article class="card">
-        <h2>Credit Consumption by Tool</h2>
+        <div class="card-title-row">
+          <div>
+            <h2>Credit Spend by Workflow</h2>
+            <p class="card-copy">Measured from backend credit ledgers, not estimated from UI telemetry.</p>
+          </div>
+        </div>
         <div class="chart-wrap">
           <canvas id="toolBreakdownChart"></canvas>
         </div>
+        <p id="toolBreakdownEmpty" class="status" hidden>No attributed tool spend has been recorded in the backend ledger yet.</p>
       </article>
-      <article class="card" style="display: flex; flex-direction: column; justify-content: center; align-items: center;">
-        <div id="toolBreakdownEmpty" style="display: none; text-align: center;">
-          <p class="muted">Tool breakdown data is not available yet.</p>
-          <p class="muted" style="font-size: 11px;">The by-tool endpoint may still be loading.</p>
+
+      <article class="card">
+        <div class="card-title-row">
+          <div>
+            <h2>Newsletter Digest</h2>
+            <p class="card-copy">Daily runout-risk summary and power-user highlights.</p>
+          </div>
+          <span id="newsletterState" class="pill pill-muted">Loading</span>
         </div>
+        <div id="newsletterMeta" class="bucket-grid"></div>
+        <details class="details-card">
+          <summary>Preview</summary>
+          <pre id="newsletterPreview" class="code-block">Loading digest preview…</pre>
+        </details>
+      </article>
+    </section>
+
+    <section class="card-grid two-up">
+      <article class="card">
+        <div class="card-title-row">
+          <div>
+            <h2>Runout Candidates</h2>
+            <p class="card-copy">Users most likely to exhaust credits first.</p>
+          </div>
+        </div>
+        <div id="runoutList" class="stack-list"></div>
+      </article>
+
+      <article class="card">
+        <div class="card-title-row">
+          <div>
+            <h2>Power Users</h2>
+            <p class="card-copy">Feature-tool time only. Dashboard shell time is excluded.</p>
+          </div>
+        </div>
+        <div id="powerUsersList" class="stack-list"></div>
       </article>
     </section>
 
     <section class="card">
       <div class="table-toolbar">
-        <h2 style="margin: 0;">User Credits Overview</h2>
+        <div>
+          <h2>User Credit Tracker</h2>
+          <p class="card-copy">Search, sort, and review burn rate versus remaining balance.</p>
+        </div>
         <input
           id="searchInput"
           class="search-input"
-          type="text"
-          placeholder="Search by name or email..."
-          aria-label="Search by name or email"
+          type="search"
+          placeholder="Search by user, email, or id"
+          aria-label="Search users"
         />
       </div>
-      <div class="table-wrap" style="max-height: 600px;">
+      <div class="table-wrap tracker-table-wrap">
         <table>
           <thead>
             <tr>
-              <th scope="col">User</th>
-              <th scope="col" class="sortable" data-sort="creditsRemaining" aria-label="Sort by Available Credits">Available Credits <span class="sort-indicator"></span></th>
-              <th scope="col" class="sortable" data-sort="totalConsumed" aria-label="Sort by Credits Consumed">Credits Consumed <span class="sort-indicator"></span></th>
-              <th scope="col">Top Tools</th>
-              <th scope="col" class="sortable" data-sort="lastSeen" aria-label="Sort by Last Active">Last Active <span class="sort-indicator"></span></th>
-              <th scope="col" class="sortable" data-sort="depletion" aria-label="Sort by Projected Depletion">Projected Depletion <span class="sort-indicator"></span></th>
+              <th scope="col" class="sortable" data-sort="identity">User</th>
+              <th scope="col" class="sortable" data-sort="risk">Risk</th>
+              <th scope="col" class="sortable" data-sort="creditsRemaining">Credits Left</th>
+              <th scope="col" class="sortable" data-sort="estimatedDailyBurn">Burn / Day</th>
+              <th scope="col" class="sortable" data-sort="depletionDays">Runway</th>
+              <th scope="col" class="sortable" data-sort="totalConsumed">Lifetime Spend</th>
+              <th scope="col">Top Workflows</th>
+              <th scope="col" class="sortable" data-sort="lastSeen">Last Seen</th>
             </tr>
           </thead>
           <tbody id="usersBody"></tbody>
@@ -124,7 +124,7 @@
       </div>
     </section>
 
-    <p id="statusLine" class="status">Loading...</p>
+    <p id="statusLine" class="status">Loading…</p>
 
     <script type="module" src="/credits.js"></script>
   </body>

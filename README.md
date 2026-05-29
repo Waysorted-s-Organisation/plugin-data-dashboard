@@ -26,6 +26,18 @@ Set required env values in `.env`:
 - `PORT` (optional, defaults to `4080`)
 - `ANALYTICS_INGEST_TOKEN` (optional but recommended)
 - `ANALYTICS_INGEST_TOKEN_REQUIRED` (`false` by default; set `true` to enforce token)
+- `CRON_SECRET` (recommended if you enable the automated digest cron)
+- `RUNOUT_CREDIT_THRESHOLD` (optional, default `50`; users below this are flagged low-credit)
+- `RUNOUT_CREDIT_DAYS` (optional, default `14`)
+- `RESEND_API_KEY` (optional, required only for actual newsletter sending)
+- `CREDIT_NEWSLETTER_FROM` (optional sender, required only for newsletter sending)
+- `CREDIT_NEWSLETTER_TO` (optional comma-separated recipients, required only for newsletter sending)
+- Optional direct backend-user sync:
+  - `BACKEND_MONGODB_URI`
+  - `BACKEND_MONGODB_DB`
+  - `BACKEND_USERS_COLLECTION` (defaults to `users`)
+  - `BACKEND_USER_BILLING_COLLECTION` (defaults to `userbillings`)
+  - `BACKEND_CREDIT_LEDGER_COLLECTION` (defaults to `creditledgers`)
 
 Optional read-access lock for dashboard pages/APIs:
 - `DASHBOARD_BASIC_AUTH_USER`
@@ -49,6 +61,19 @@ Set these env vars in Vercel Project Settings:
 - `MONGODB_URI` (or one of the fallback URI names listed above)
 - `MONGODB_DB` (optional)
 - `ANALYTICS_INGEST_TOKEN` (recommended)
+- `CRON_SECRET`
+- Optional credit digest delivery:
+  - `RUNOUT_CREDIT_THRESHOLD`
+  - `RUNOUT_CREDIT_DAYS`
+  - `RESEND_API_KEY`
+  - `CREDIT_NEWSLETTER_FROM`
+  - `CREDIT_NEWSLETTER_TO`
+- Optional direct backend-user sync:
+  - `BACKEND_MONGODB_URI`
+  - `BACKEND_MONGODB_DB`
+  - `BACKEND_USERS_COLLECTION`
+  - `BACKEND_USER_BILLING_COLLECTION`
+  - `BACKEND_CREDIT_LEDGER_COLLECTION`
 - Optional auth gate:
   - `DASHBOARD_BASIC_AUTH_USER`
   - `DASHBOARD_BASIC_AUTH_PASS`
@@ -106,6 +131,9 @@ ANALYTICS_INGEST_TOKEN_REQUIRED=true
 - `GET /api/plugin-analytics/sessions`
 - `GET /api/plugin-analytics/recent-events`
 - `GET /api/plugin-analytics/dashboard` (single optimized payload for UI)
+- `GET /api/plugin-analytics/credit-intelligence`
+- `GET /api/plugin-analytics/newsletter/runout-preview`
+- `POST /api/plugin-analytics/newsletter/runout-send`
 
 Common query params:
 - `from=<ISO date>`
@@ -125,3 +153,11 @@ Additional dashboard endpoint query params:
 
 - This dashboard is internal-only by design.
 - The Figma plugin side can send both authenticated and anonymous events; user identity fields are optional in each event.
+- Credit Intelligence merges two sources:
+  - real user balances/emails from the Waysorted backend Mongo collections
+  - backend `creditledgers` for tool-attributed credit spend
+  - plugin analytics events for tool time, activity timing, and engagement overlays
+- Automated daily digest:
+  - `vercel.json` schedules `/api/ops/credit-digest` at `05:00 UTC`.
+  - The route validates `Authorization: Bearer ${CRON_SECRET}` as recommended by Vercel Cron Jobs.
+  - Email sending uses Resend's `/emails` API when `RESEND_API_KEY`, `CREDIT_NEWSLETTER_FROM`, and `CREDIT_NEWSLETTER_TO` are configured.

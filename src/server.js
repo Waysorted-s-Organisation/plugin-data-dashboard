@@ -7,7 +7,15 @@ import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 
-import { ensureIndexes, getEventsCollection, getEngagementCollection, getSnapshotsCollection } from "./db.js";
+import {
+  getBackendCreditLedgerCollection,
+  ensureIndexes,
+  getBackendUserBillingCollection,
+  getBackendUsersCollection,
+  getEventsCollection,
+  getEngagementCollection,
+  getSnapshotsCollection,
+} from "./db.js";
 
 dotenv.config();
 
@@ -149,6 +157,18 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+const RUNOUT_CREDIT_THRESHOLD = Math.max(
+  0,
+  Number(process.env.RUNOUT_CREDIT_THRESHOLD || 50) || 50
+);
+const RUNOUT_CREDIT_DAYS = Math.max(
+  1,
+  Number(process.env.RUNOUT_CREDIT_DAYS || 14) || 14
+);
+const CREDIT_NEWSLETTER_FROM = safeString(process.env.CREDIT_NEWSLETTER_FROM, 240);
+const CREDIT_NEWSLETTER_TO = safeString(process.env.CREDIT_NEWSLETTER_TO, 1000);
+const RESEND_API_KEY = safeString(process.env.RESEND_API_KEY, 240);
+
 function addMatchClause(match, clause) {
   if (!clause || typeof clause !== "object") return;
   if (!match.$and) {
@@ -241,7 +261,39 @@ const TOOL_ALIASES = {
   game: "wayfall-game",
   "liquid-glass": "liquid-glass",
   liquid_glass: "liquid-glass",
+  ai: "ai",
+  eps: "eps",
+  pdf: "pdf",
+  psd: "psd",
   unknown: "unknown",
+};
+
+const INTERNAL_TOOL_SET = new Set([
+  "dashboard",
+  "collapsed-dashboard",
+  "profile",
+  "unknown",
+  "system",
+]);
+
+const TOOL_LABELS = {
+  dashboard: "Dashboard",
+  "collapsed-dashboard": "Collapsed Dashboard",
+  palettable: "Palette Tool",
+  "frame-gallery": "Frames to PDF",
+  "import-tool": "Import Tool",
+  "unit-converter": "Unit Converter",
+  "html-to-design": "HTML to Design",
+  "comment-summarizer": "Comment Summarizer",
+  profile: "Profile",
+  "wayfall-game": "Wayfall Game",
+  "liquid-glass": "Liquid Glass",
+  ai: "AI Import",
+  eps: "EPS Import",
+  pdf: "PDF Import",
+  psd: "PSD Import",
+  unknown: "Unknown",
+  system: "System",
 };
 
 const ACTION_TO_TOOL = {
@@ -640,6 +692,16 @@ function normalizeToolId(toolId) {
   return TOOL_ALIASES[normalized] || normalized;
 }
 
+function isInternalTool(toolId) {
+  const normalized = normalizeToolId(toolId);
+  return Boolean(normalized && INTERNAL_TOOL_SET.has(normalized));
+}
+
+function getToolLabel(toolId) {
+  const normalized = normalizeToolId(toolId) || "unknown";
+  return TOOL_LABELS[normalized] || normalized;
+}
+
 function inferToolFromAction(action) {
   const key = safeString(action, 120);
   if (!key) return null;
@@ -712,6 +774,18 @@ function anonymousIdFromSeed(seed) {
   return `device_${stableHashId(value)}`;
 }
 
+function userIdentityExpression() {
+  return {
+    $cond: [
+      { $eq: ["$user.isAuthenticated", true] },
+      "$user.userId",
+      {
+        $ifNull: ["$user.anonymousId", null],
+      },
+    ],
+  };
+}
+
 function normalizeUser(user, fallbackAnonymousSeed = null) {
   if (!user || typeof user !== "object") {
     const fallbackAnonymousId = anonymousIdFromSeed(fallbackAnonymousSeed);
@@ -753,6 +827,15 @@ function normalizeUser(user, fallbackAnonymousSeed = null) {
       : fallbackAnonymousId
       ? "device-fallback"
       : null);
+  const creditsRemainingValue = Number(
+    user.creditsRemaining ??
+      (user.billing &&
+      typeof user.billing === "object" &&
+      user.billing.wallet &&
+      typeof user.billing.wallet === "object"
+        ? user.billing.wallet.availableCredits
+        : null)
+  );
 
   return {
     isAuthenticated,
@@ -761,6 +844,9 @@ function normalizeUser(user, fallbackAnonymousSeed = null) {
     name: isAuthenticated ? safeString(user.name, 120) : null,
     email: isAuthenticated ? safeString(user.email, 160) : null,
     identitySource,
+    creditsRemaining: Number.isFinite(creditsRemainingValue)
+      ? Math.max(0, creditsRemainingValue)
+      : null,
   };
 }
 
@@ -915,6 +1001,20 @@ function readAuthGate(req, res, next) {
   return next();
 }
 
+function cronAuthGate(req, res, next) {
+  const expected = safeString(process.env.CRON_SECRET, 240);
+  if (!expected) {
+    return res.status(503).json({ error: "CRON_SECRET is not configured" });
+  }
+
+  const authHeader = safeString(req.headers.authorization, 320);
+  if (authHeader !== `Bearer ${expected}`) {
+    return res.status(401).json({ error: "Unauthorized cron invocation" });
+  }
+
+  return next();
+}
+
 function ingestAuthGate(req, res, next) {
   if (!INGEST_TOKEN) return next();
 
@@ -951,68 +1051,46 @@ export async function initializeServer() {
   await initializationPromise;
 }
 
+async function buildCurrentStatsSnapshot(now = new Date()) {
+  const dateString = now.toISOString().slice(0, 10);
+  const eventsCollection = await getEventsCollection();
+  const engagementCollection = await getEngagementCollection();
+  const todayStart = new Date(dateString + "T00:00:00.000Z");
+  const todayEnd = new Date(dateString + "T23:59:59.999Z");
+  const [stats, creditCount, activeSessionsArr] = await Promise.all([
+    computePublicStatsMetrics(eventsCollection, engagementCollection, now),
+    eventsCollection.countDocuments({ eventType: "credit_consumed" }),
+    eventsCollection.distinct("sessionId", {
+      eventAt: { $gte: todayStart, $lte: todayEnd },
+    }),
+  ]);
+
+  return {
+    _id: dateString,
+    date: new Date(dateString),
+    mau: stats.mau || 0,
+    authenticatedUsers: stats.authenticatedUsers || 0,
+    likes: stats.likes || 0,
+    saves: stats.saves || 0,
+    follows: stats.follows || 0,
+    reuses: stats.reused || 0,
+    creditsConsumed: creditCount,
+    activeSessions: activeSessionsArr.length,
+    recordedAt: now,
+  };
+}
+
 async function recordDailySnapshot() {
   try {
-    const now = new Date();
-    const dateString = now.toISOString().slice(0, 10);
+    const snapshot = await buildCurrentStatsSnapshot(new Date());
     const snapshotsCollection = await getSnapshotsCollection();
 
-    const existing = await snapshotsCollection.findOne({ _id: dateString });
-    if (existing) return;
-
-    const eventsCollection = await getEventsCollection();
-    const engagementCollection = await getEngagementCollection();
-    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-    const todayStart = new Date(dateString + "T00:00:00.000Z");
-    const todayEnd = new Date(dateString + "T23:59:59.999Z");
-
-    const [
-      authMAU,
-      anonMAU,
-      authUsersArr,
-      globalStats,
-      creditCount,
-      activeSessionsArr,
-    ] = await Promise.all([
-      eventsCollection.distinct("user.userId", {
-        eventAt: { $gte: thirtyDaysAgo },
-        "user.isAuthenticated": true,
-        "user.userId": { $ne: null },
-      }),
-      eventsCollection.distinct("user.anonymousId", {
-        eventAt: { $gte: thirtyDaysAgo },
-        "user.isAuthenticated": false,
-        "user.anonymousId": { $ne: null },
-      }),
-      eventsCollection.distinct("user.userId", {
-        eventAt: { $gte: thirtyDaysAgo },
-        "user.isAuthenticated": true,
-        "user.userId": { $ne: null },
-      }),
-      engagementCollection.findOne({ _id: "global_stats" }),
-      eventsCollection.countDocuments({ eventType: "credit_consumed" }),
-      eventsCollection.distinct("sessionId", {
-        eventAt: { $gte: todayStart, $lte: todayEnd },
-      }),
-    ]);
-
-    const stats = globalStats || {};
-    const snapshot = {
-      _id: dateString,
-      date: new Date(dateString),
-      mau: authMAU.length + anonMAU.length,
-      authenticatedUsers: authUsersArr.length,
-      likes: stats.likes || 0,
-      saves: stats.saves || 0,
-      follows: stats.follows || 0,
-      reuses: stats.reused || 0,
-      creditsConsumed: creditCount,
-      activeSessions: activeSessionsArr.length,
-      recordedAt: now,
-    };
-
-    await snapshotsCollection.insertOne(snapshot);
-    console.log(`Daily snapshot recorded for ${dateString}`);
+    await snapshotsCollection.updateOne(
+      { _id: snapshot._id },
+      { $set: snapshot },
+      { upsert: true }
+    );
+    console.log(`Daily snapshot refreshed for ${snapshot._id}`);
   } catch (error) {
     console.error("Failed to record daily snapshot:", error);
   }
@@ -1024,6 +1102,27 @@ app.get("/health", (_req, res) => {
     service: "plugin-data-dashboard",
     initialized: isInitialized,
   });
+});
+
+app.get("/api/ops/credit-digest", cronAuthGate, async (_req, res) => {
+  try {
+    await initializeServer();
+    await recordDailySnapshot();
+
+    const eventsCollection = await getEventsCollection();
+    const intelligence = await fetchCreditIntelligence(eventsCollection);
+    const result = await sendCreditNewsletter(intelligence.newsletter);
+
+    return res.json({
+      ok: true,
+      snapshotDate: new Date().toISOString().slice(0, 10),
+      newsletter: result,
+      summary: intelligence.summary,
+    });
+  } catch (error) {
+    console.error("Credit digest cron failed:", error);
+    return res.status(500).json({ error: "Credit digest cron failed" });
+  }
 });
 
 app.use("/api/plugin-analytics", async (_req, res, next) => {
@@ -1550,6 +1649,1365 @@ function orderedNamedCounter(counter, labelKey, order) {
     .sort((a, b) => b.count - a.count);
 
   return rows.concat(extras);
+}
+
+function roundNumber(value, digits = 2) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Number(n.toFixed(digits));
+}
+
+function parseEmailList(value) {
+  const raw = safeString(value, 2000);
+  if (!raw) return [];
+  return Array.from(
+    new Set(
+      raw
+        .split(/[;,]/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+function normalizeEmailKey(value) {
+  const email = safeString(value, 160);
+  return email ? email.toLowerCase() : null;
+}
+
+function calculateDepletionDays(creditsRemaining, estimatedDailyBurn) {
+  if (!Number.isFinite(creditsRemaining) || creditsRemaining <= 0) return null;
+  if (!Number.isFinite(estimatedDailyBurn) || estimatedDailyBurn <= 0) return null;
+  return Math.ceil(creditsRemaining / estimatedDailyBurn);
+}
+
+function classifyCreditRisk(user) {
+  const remaining =
+    user.creditsRemaining === null || user.creditsRemaining === undefined
+      ? null
+      : Number(user.creditsRemaining);
+  const depletionDays =
+    user.depletionDays === null || user.depletionDays === undefined
+      ? null
+      : Number(user.depletionDays);
+
+  if (Number.isFinite(remaining) && remaining < RUNOUT_CREDIT_THRESHOLD / 2) {
+    return "critical";
+  }
+  if (Number.isFinite(depletionDays) && depletionDays <= RUNOUT_CREDIT_DAYS) {
+    return "warning";
+  }
+  if (Number.isFinite(remaining) && remaining < RUNOUT_CREDIT_THRESHOLD) {
+    return "warning";
+  }
+  return "healthy";
+}
+
+async function countProjectedActions(eventsCollection, actionKeys) {
+  const normalizedActions = Array.from(
+    new Set((actionKeys || []).map((key) => String(key || "").trim().toLowerCase()).filter(Boolean))
+  );
+  if (!normalizedActions.length) return 0;
+
+  const rows = await eventsCollection
+    .aggregate([
+      {
+        $project: {
+          action: {
+            $toLower: {
+              $ifNull: [actionProjectionExpression(), ""],
+            },
+          },
+        },
+      },
+      {
+        $match: {
+          action: { $in: normalizedActions },
+        },
+      },
+      {
+        $count: "count",
+      },
+    ])
+    .toArray();
+
+  return Number(rows[0] && rows[0].count ? rows[0].count : 0);
+}
+
+async function countFavoriteAdds(eventsCollection) {
+  const rows = await eventsCollection
+    .aggregate([
+      {
+        $project: {
+          eventType: 1,
+          isFavorited: "$payload.isFavorited",
+          action: {
+            $toLower: {
+              $ifNull: [actionProjectionExpression(), ""],
+            },
+          },
+        },
+      },
+      {
+        $match: {
+          $or: [
+            {
+              eventType: { $in: ["tool_favorite_changed", "importer_favorite_changed"] },
+              isFavorited: true,
+            },
+            {
+              action: { $in: ["favorite:add", "importer-favorite:add"] },
+            },
+          ],
+        },
+      },
+      { $count: "count" },
+    ])
+    .toArray();
+
+  return Number(rows[0] && rows[0].count ? rows[0].count : 0);
+}
+
+async function countReusedUsers(eventsCollection) {
+  const rows = await eventsCollection
+    .aggregate([
+      {
+        $addFields: {
+          normalizedUserId: userIdentityExpression(),
+        },
+      },
+      {
+        $match: {
+          normalizedUserId: { $ne: null },
+        },
+      },
+      {
+        $group: {
+          _id: "$normalizedUserId",
+          sessionIds: { $addToSet: "$sessionId" },
+        },
+      },
+      {
+        $project: {
+          sessionCount: {
+            $size: {
+              $setDifference: ["$sessionIds", [null]],
+            },
+          },
+        },
+      },
+      {
+        $match: {
+          sessionCount: { $gt: 1 },
+        },
+      },
+      {
+        $count: "count",
+      },
+    ])
+    .toArray();
+
+  return Number(rows[0] && rows[0].count ? rows[0].count : 0);
+}
+
+async function computePublicStatsMetrics(eventsCollection, engagementCollection, now = new Date()) {
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+  const [
+    authMAU,
+    anonMAU,
+    manualStats,
+    likes,
+    saves,
+    follows,
+    reused,
+  ] = await Promise.all([
+    eventsCollection.distinct("user.userId", {
+      eventAt: { $gte: thirtyDaysAgo },
+      "user.isAuthenticated": true,
+      "user.userId": { $ne: null },
+    }),
+    eventsCollection.distinct("user.anonymousId", {
+      eventAt: { $gte: thirtyDaysAgo },
+      "user.isAuthenticated": false,
+      "user.anonymousId": { $ne: null },
+    }),
+    engagementCollection.findOne({ _id: "global_stats" }),
+    countFavoriteAdds(eventsCollection),
+    countProjectedActions(eventsCollection, ["save-preset"]),
+    countProjectedActions(eventsCollection, ["emailentered", "emailEntered"]),
+    countReusedUsers(eventsCollection),
+  ]);
+
+  const manual = manualStats || {};
+  const authenticatedUsers = authMAU.length;
+  const mau = authenticatedUsers + anonMAU.length;
+
+  const installs = Math.max(
+    Number(manual.installs || 0),
+    authenticatedUsers
+  );
+
+  return {
+    mau,
+    authenticatedUsers,
+    anonymousUsers: anonMAU.length,
+    likes: Math.max(Number(manual.likes || 0), likes),
+    saves: Math.max(Number(manual.saves || 0), saves),
+    follows: Math.max(Number(manual.follows || 0), follows),
+    reused: Math.max(Number(manual.reused || 0), reused),
+    installs,
+    reuses: Math.max(Number(manual.reused || 0), reused),
+  };
+}
+
+function startOfUtcDay(value) {
+  const date = value instanceof Date ? new Date(value) : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function addUtcDays(date, days) {
+  const next = new Date(date);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function dayKeyFromDate(value) {
+  const date = startOfUtcDay(value);
+  return date ? date.toISOString().slice(0, 10) : null;
+}
+
+function dayKeyToDate(dayKey) {
+  return new Date(`${dayKey}T00:00:00.000Z`);
+}
+
+function enumerateDayKeys(startDate, endDate) {
+  const keys = [];
+  if (!startDate || !endDate || startDate > endDate) return keys;
+  for (let cursor = new Date(startDate); cursor <= endDate; cursor = addUtcDays(cursor, 1)) {
+    keys.push(dayKeyFromDate(cursor));
+  }
+  return keys;
+}
+
+async function buildPublicStatsHistory(eventsCollection, range = "90d", now = new Date()) {
+  const endDay = startOfUtcDay(now);
+  const endExclusive = addUtcDays(endDay, 1);
+  const rangeMap = {
+    "7d": 7,
+    "30d": 30,
+    "90d": 90,
+    "180d": 180,
+    "365d": 365,
+  };
+
+  const minEventRows = await eventsCollection
+    .aggregate([
+      {
+        $group: {
+          _id: null,
+          minAt: { $min: "$eventAt" },
+        },
+      },
+    ])
+    .toArray();
+
+  const minEventAt = minEventRows[0] && minEventRows[0].minAt ? new Date(minEventRows[0].minAt) : null;
+  const earliestDay = minEventAt ? startOfUtcDay(minEventAt) : endDay;
+  const rangeDays = rangeMap[range] || null;
+  const startDay = rangeDays
+    ? (addUtcDays(endDay, -(rangeDays - 1)) > earliestDay ? addUtcDays(endDay, -(rangeDays - 1)) : earliestDay)
+    : earliestDay;
+
+  const [dailyActivityRows, dailyActionRows] = await Promise.all([
+    eventsCollection
+      .aggregate([
+        {
+          $match: {
+            eventAt: { $gte: earliestDay, $lt: endExclusive },
+          },
+        },
+        {
+          $addFields: {
+            normalizedUserId: userIdentityExpression(),
+            dayKey: {
+              $dateToString: {
+                format: "%Y-%m-%d",
+                date: "$eventAt",
+              },
+            },
+          },
+        },
+        {
+          $match: {
+            normalizedUserId: { $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              dayKey: "$dayKey",
+              userId: "$normalizedUserId",
+            },
+            isAuthenticated: {
+              $max: {
+                $cond: [{ $eq: ["$user.isAuthenticated", true] }, 1, 0],
+              },
+            },
+            sessionIds: { $addToSet: "$sessionId" },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            dayKey: "$_id.dayKey",
+            userId: "$_id.userId",
+            isAuthenticated: 1,
+            sessionIds: {
+              $setDifference: ["$sessionIds", [null]],
+            },
+          },
+        },
+        {
+          $sort: {
+            dayKey: 1,
+          },
+        },
+      ])
+      .toArray(),
+    eventsCollection
+      .aggregate([
+        {
+          $match: {
+            eventAt: { $gte: earliestDay, $lt: endExclusive },
+          },
+        },
+        {
+          $project: {
+            dayKey: {
+              $dateToString: {
+                format: "%Y-%m-%d",
+                date: "$eventAt",
+              },
+            },
+            eventType: 1,
+            isFavorited: "$payload.isFavorited",
+            action: {
+              $toLower: {
+                $ifNull: [actionProjectionExpression(), ""],
+              },
+            },
+          },
+        },
+        {
+          $group: {
+            _id: "$dayKey",
+            likes: {
+              $sum: {
+                $cond: [
+                  {
+                    $or: [
+                      {
+                        $and: [
+                          {
+                            $in: [
+                              "$eventType",
+                              ["tool_favorite_changed", "importer_favorite_changed"],
+                            ],
+                          },
+                          { $eq: ["$isFavorited", true] },
+                        ],
+                      },
+                      {
+                        $in: ["$action", ["favorite:add", "importer-favorite:add"]],
+                      },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+            saves: {
+              $sum: {
+                $cond: [{ $eq: ["$action", "save-preset"] }, 1, 0],
+              },
+            },
+            follows: {
+              $sum: {
+                $cond: [{ $eq: ["$action", "emailentered"] }, 1, 0],
+              },
+            },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            dayKey: "$_id",
+            likes: 1,
+            saves: 1,
+            follows: 1,
+          },
+        },
+        {
+          $sort: {
+            dayKey: 1,
+          },
+        },
+      ])
+      .toArray(),
+  ]);
+
+  const activityByDay = new Map();
+  for (const row of dailyActivityRows) {
+    const dayKey = safeString(row.dayKey);
+    const userId = safeString(row.userId);
+    if (!dayKey || !userId) continue;
+    const bucket = activityByDay.get(dayKey) || {
+      authUsers: new Set(),
+      anonUsers: new Set(),
+      sessionRows: [],
+      sessionIds: new Set(),
+    };
+    if (Number(row.isAuthenticated || 0) === 1) {
+      bucket.authUsers.add(userId);
+    } else {
+      bucket.anonUsers.add(userId);
+    }
+    const sessionIds = Array.isArray(row.sessionIds)
+      ? row.sessionIds.map((value) => safeString(value)).filter(Boolean)
+      : [];
+    for (const sessionId of sessionIds) {
+      bucket.sessionIds.add(sessionId);
+    }
+    bucket.sessionRows.push({
+      userId,
+      sessionIds,
+    });
+    activityByDay.set(dayKey, bucket);
+  }
+
+  const actionsByDay = new Map();
+  for (const row of dailyActionRows) {
+    const dayKey = safeString(row.dayKey);
+    if (!dayKey) continue;
+    actionsByDay.set(dayKey, {
+      likes: Number(row.likes || 0),
+      saves: Number(row.saves || 0),
+      follows: Number(row.follows || 0),
+    });
+  }
+
+  const allDayKeys = enumerateDayKeys(earliestDay, endDay);
+  const rollingAuthBuckets = [];
+  const rollingAnonBuckets = [];
+  const cumulativeUserSessions = new Map();
+  let runningLikes = 0;
+  let runningSaves = 0;
+  let runningFollows = 0;
+  let runningReused = 0;
+  const outputRows = [];
+  const startDayKey = dayKeyFromDate(startDay);
+
+  for (let index = 0; index < allDayKeys.length; index += 1) {
+    const dayKey = allDayKeys[index];
+    const bucket = activityByDay.get(dayKey) || {
+      authUsers: new Set(),
+      anonUsers: new Set(),
+      sessionRows: [],
+      sessionIds: new Set(),
+    };
+
+    rollingAuthBuckets.push(bucket.authUsers);
+    rollingAnonBuckets.push(bucket.anonUsers);
+    if (rollingAuthBuckets.length > 30) rollingAuthBuckets.shift();
+    if (rollingAnonBuckets.length > 30) rollingAnonBuckets.shift();
+
+    for (const row of bucket.sessionRows) {
+      const userSessions = cumulativeUserSessions.get(row.userId) || new Set();
+      const previousSize = userSessions.size;
+      for (const sessionId of row.sessionIds) {
+        userSessions.add(sessionId);
+      }
+      cumulativeUserSessions.set(row.userId, userSessions);
+      if (previousSize <= 1 && userSessions.size > 1) {
+        runningReused += 1;
+      }
+    }
+
+    const actionBucket = actionsByDay.get(dayKey) || { likes: 0, saves: 0, follows: 0 };
+    runningLikes += actionBucket.likes;
+    runningSaves += actionBucket.saves;
+    runningFollows += actionBucket.follows;
+
+    if (dayKey < startDayKey) continue;
+
+    const authWindow = new Set();
+    const anonWindow = new Set();
+    for (const authSet of rollingAuthBuckets) {
+      for (const userId of authSet) authWindow.add(userId);
+    }
+    for (const anonSet of rollingAnonBuckets) {
+      for (const userId of anonSet) anonWindow.add(userId);
+    }
+
+    outputRows.push({
+      _id: dayKey,
+      date: dayKeyToDate(dayKey),
+      mau: authWindow.size + anonWindow.size,
+      authenticatedUsers: authWindow.size,
+      anonymousUsers: anonWindow.size,
+      likes: runningLikes,
+      saves: runningSaves,
+      follows: runningFollows,
+      reused: runningReused,
+      reuses: runningReused,
+      creditsConsumed: 0,
+      activeSessions: bucket.sessionIds.size,
+      recordedAt: now,
+    });
+  }
+
+  return outputRows;
+}
+
+async function fetchBackendCreditUsers() {
+  const [usersCollection, billingCollection] = await Promise.all([
+    getBackendUsersCollection(),
+    getBackendUserBillingCollection(),
+  ]);
+
+  const rows = await usersCollection
+    .aggregate([
+      {
+        $lookup: {
+          from: billingCollection.collectionName,
+          localField: "_id",
+          foreignField: "user",
+          as: "billingRecords",
+        },
+      },
+      {
+        $addFields: {
+          latestBilling: {
+            $arrayElemAt: ["$billingRecords", 0],
+          },
+        },
+      },
+      {
+        $project: {
+          _id: {
+            $toString: "$_id",
+          },
+          isAuthenticated: {
+            $literal: true,
+          },
+          name: "$name",
+          email: "$email",
+          firstSeen: "$createdAt",
+          lastSeen: "$updatedAt",
+          creditsRemaining: {
+            $ifNull: [
+              {
+                $convert: {
+                  input: "$latestBilling.availableCredits",
+                  to: "double",
+                  onError: null,
+                  onNull: null,
+                },
+              },
+              {
+                $convert: {
+                  input: "$creditsRemaining",
+                  to: "double",
+                  onError: null,
+                  onNull: null,
+                },
+              },
+            ],
+          },
+          heldCredits: {
+            $convert: {
+              input: "$latestBilling.heldCredits",
+              to: "double",
+              onError: 0,
+              onNull: 0,
+            },
+          },
+          lifetimeSpentCredits: {
+            $convert: {
+              input: "$latestBilling.lifetimeSpentCredits",
+              to: "double",
+              onError: 0,
+              onNull: 0,
+            },
+          },
+          subscriptionStatus: "$latestBilling.subscriptionStatus",
+        },
+      },
+      {
+        $sort: {
+          email: 1,
+          _id: 1,
+        },
+      },
+    ])
+    .toArray();
+
+  return rows.map((row) => ({
+    _id: safeString(row._id),
+    isAuthenticated: true,
+    name: safeString(row.name, 160) || null,
+    email: safeString(row.email, 160) || null,
+    firstSeen: row.firstSeen || null,
+    lastSeen: row.lastSeen || null,
+    creditsRemaining: Number.isFinite(Number(row.creditsRemaining))
+      ? Math.max(0, Number(row.creditsRemaining))
+      : null,
+    heldCredits: Number.isFinite(Number(row.heldCredits))
+      ? Math.max(0, Number(row.heldCredits))
+      : 0,
+    lifetimeSpentCredits: Number.isFinite(Number(row.lifetimeSpentCredits))
+      ? Math.max(0, Number(row.lifetimeSpentCredits))
+      : 0,
+    subscriptionStatus: safeString(row.subscriptionStatus, 80) || null,
+  }));
+}
+
+async function fetchBackendCreditLedgerSpendRows() {
+  const ledgerCollection = await getBackendCreditLedgerCollection();
+
+  const rows = await ledgerCollection
+    .aggregate([
+      {
+        $match: {
+          toolCode: { $ne: null },
+          reason: {
+            $in: ["reservation_hold", "reservation_release", "reservation_commit"],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            user: {
+              $toString: "$user",
+            },
+            tool: "$toolCode",
+          },
+          count: { $sum: 1 },
+          netSpent: {
+            $sum: {
+              $multiply: [
+                {
+                  $convert: {
+                    input: "$deltaCredits",
+                    to: "double",
+                    onError: 0,
+                    onNull: 0,
+                  },
+                },
+                -1,
+              ],
+            },
+          },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          userId: "$_id.user",
+          tool: "$_id.tool",
+          count: 1,
+          totalAmount: { $round: ["$netSpent", 2] },
+        },
+      },
+      {
+        $match: {
+          totalAmount: { $gt: 0 },
+        },
+      },
+      {
+        $sort: {
+          totalAmount: -1,
+          count: -1,
+        },
+      },
+    ])
+    .toArray();
+
+  return rows.map((row) => ({
+    userId: safeString(row.userId),
+    tool: normalizeToolId(row.tool) || safeString(row.tool) || "unknown",
+    count: Number(row.count || 0),
+    totalAmount: roundNumber(row.totalAmount, 2),
+  }));
+}
+
+async function fetchCreditIntelligence(eventsCollection) {
+  const now = new Date();
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const aggregateOptions = { allowDiskUse: true };
+  const creditAmountExpression = {
+    $convert: {
+      input: "$payload.amount",
+      to: "double",
+      onError: 1,
+      onNull: 1,
+    },
+  };
+  const durationExpression = {
+    $convert: {
+      input: "$payload.durationMs",
+      to: "double",
+      onError: 0,
+      onNull: 0,
+    },
+  };
+
+  const backendUsers = await fetchBackendCreditUsers();
+  const backendLedgerSpendRows = await fetchBackendCreditLedgerSpendRows();
+  const activityRows = await eventsCollection
+      .aggregate([
+        {
+          $addFields: {
+            normalizedUserId: userIdentityExpression(),
+          },
+        },
+        {
+          $match: {
+            normalizedUserId: { $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: "$normalizedUserId",
+            isAuthenticated: {
+              $max: {
+                $cond: [{ $eq: ["$user.isAuthenticated", true] }, 1, 0],
+              },
+            },
+            name: { $max: "$user.name" },
+            email: { $max: "$user.email" },
+            lastSeen: { $max: "$eventAt" },
+            firstSeen: { $min: "$eventAt" },
+            sessionIds: { $addToSet: "$sessionId" },
+          },
+        },
+        {
+          $project: {
+            _id: 1,
+            isAuthenticated: 1,
+            name: 1,
+            email: 1,
+            lastSeen: 1,
+            firstSeen: 1,
+            sessionCount: {
+              $size: {
+                $setDifference: ["$sessionIds", [null]],
+              },
+            },
+          },
+        },
+      ], aggregateOptions)
+      .toArray();
+  const balanceRows = await eventsCollection
+      .aggregate([
+        {
+          $match: {
+            "user.creditsRemaining": { $exists: true, $ne: null },
+          },
+        },
+        {
+          $addFields: {
+            normalizedUserId: userIdentityExpression(),
+            creditsRemainingValue: {
+              $convert: {
+                input: "$user.creditsRemaining",
+                to: "double",
+                onError: null,
+                onNull: null,
+              },
+            },
+          },
+        },
+        {
+          $match: {
+            normalizedUserId: { $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: "$normalizedUserId",
+            creditsRemaining: { $max: "$creditsRemainingValue" },
+            balanceSeenAt: { $max: "$eventAt" },
+          },
+        },
+      ], aggregateOptions)
+      .toArray();
+  const spendRows = await eventsCollection
+      .aggregate([
+        {
+          $match: {
+            eventType: "credit_consumed",
+          },
+        },
+        {
+          $addFields: {
+            normalizedUserId: userIdentityExpression(),
+            creditAmount: creditAmountExpression,
+          },
+        },
+        {
+          $match: {
+            normalizedUserId: { $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: "$normalizedUserId",
+            totalConsumed: { $sum: "$creditAmount" },
+            creditEventCount: { $sum: 1 },
+            consumed7d: {
+              $sum: {
+                $cond: [{ $gte: ["$eventAt", sevenDaysAgo] }, "$creditAmount", 0],
+              },
+            },
+            consumed30d: {
+              $sum: {
+                $cond: [{ $gte: ["$eventAt", thirtyDaysAgo] }, "$creditAmount", 0],
+              },
+            },
+            firstCreditAt: { $min: "$eventAt" },
+            lastCreditAt: { $max: "$eventAt" },
+          },
+        },
+      ], aggregateOptions)
+      .toArray();
+  const topToolRows = await eventsCollection
+      .aggregate([
+        {
+          $match: {
+            eventType: "tool_time_spent",
+          },
+        },
+        {
+          $addFields: {
+            normalizedUserId: userIdentityExpression(),
+            totalTimeMsValue: durationExpression,
+          },
+        },
+        {
+          $match: {
+            normalizedUserId: { $ne: null },
+            tool: { $nin: [null, "unknown"] },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              user: "$normalizedUserId",
+              tool: "$tool",
+            },
+            totalTimeMs: { $sum: "$totalTimeMsValue" },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            userId: "$_id.user",
+            tool: "$_id.tool",
+            timeSpentMs: { $round: ["$totalTimeMs", 2] },
+          },
+        },
+      ], aggregateOptions)
+      .toArray();
+
+  const users = new Map();
+  const identityAliases = new Map();
+  const emailIndex = new Map();
+
+  function createEmptyUser(key) {
+    return {
+      _id: key,
+      isAuthenticated: false,
+      name: null,
+      email: null,
+      firstSeen: null,
+      lastSeen: null,
+      sessionCount: 0,
+      creditsRemaining: null,
+      heldCredits: 0,
+      totalConsumed: 0,
+      creditEventCount: 0,
+      consumed7d: 0,
+      consumed30d: 0,
+      totalTimeSpentMs: 0,
+      topTools: [],
+      topCreditTools: [],
+      lifetimeSpentCredits: 0,
+      subscriptionStatus: null,
+    };
+  }
+
+  function registerEmailIdentity(key, email) {
+    const emailKey = normalizeEmailKey(email);
+    if (!emailKey) return;
+    emailIndex.set(emailKey, key);
+    if (emailKey !== key) {
+      identityAliases.set(emailKey, key);
+    }
+  }
+
+  function resolveUserKey(rawId, email) {
+    const normalizedId = safeString(rawId);
+    if (normalizedId) {
+      if (users.has(normalizedId)) return normalizedId;
+      if (identityAliases.has(normalizedId)) return identityAliases.get(normalizedId);
+    }
+
+    const emailKey = normalizeEmailKey(email);
+    if (emailKey && emailIndex.has(emailKey)) {
+      const resolvedKey = emailIndex.get(emailKey);
+      if (normalizedId && normalizedId !== resolvedKey) {
+        identityAliases.set(normalizedId, resolvedKey);
+      }
+      return resolvedKey;
+    }
+
+    return null;
+  }
+
+  function getExistingUser(rawId, email) {
+    const resolvedKey = resolveUserKey(rawId, email);
+    if (!resolvedKey) return null;
+
+    const existing = users.get(resolvedKey);
+    if (!existing) return null;
+
+    const normalizedId = safeString(rawId);
+    if (normalizedId && normalizedId !== resolvedKey) {
+      identityAliases.set(normalizedId, resolvedKey);
+    }
+    registerEmailIdentity(resolvedKey, email || existing.email);
+
+    return existing;
+  }
+
+  for (const row of backendUsers) {
+    if (!row || !row._id) continue;
+    const current = createEmptyUser(row._id);
+    current.isAuthenticated = true;
+    current.name = row.name || null;
+    current.email = row.email || null;
+    current.firstSeen = row.firstSeen || null;
+    current.lastSeen = row.lastSeen || null;
+    current.creditsRemaining = Number.isFinite(Number(row.creditsRemaining))
+      ? Math.max(0, Number(row.creditsRemaining))
+      : null;
+    current.heldCredits = Number.isFinite(Number(row.heldCredits))
+      ? Math.max(0, Number(row.heldCredits))
+      : 0;
+    current.lifetimeSpentCredits = roundNumber(row.lifetimeSpentCredits, 2);
+    current.totalConsumed = roundNumber(row.lifetimeSpentCredits, 2);
+    current.subscriptionStatus = row.subscriptionStatus || null;
+    users.set(row._id, current);
+    registerEmailIdentity(row._id, row.email);
+  }
+
+  for (const row of activityRows) {
+    const current = getExistingUser(row._id, row.email);
+    if (!current) continue;
+    current.isAuthenticated = current.isAuthenticated || row.isAuthenticated === 1;
+    current.name = current.name || row.name || null;
+    current.email = current.email || row.email || null;
+    current.firstSeen = current.firstSeen || row.firstSeen || null;
+    current.lastSeen = row.lastSeen || current.lastSeen || null;
+    current.sessionCount = Math.max(Number(current.sessionCount || 0), Number(row.sessionCount || 0));
+    registerEmailIdentity(current._id, current.email);
+  }
+
+  for (const row of balanceRows) {
+    const current = getExistingUser(row._id, null);
+    if (!current) continue;
+    current.creditsRemaining = Number.isFinite(Number(row.creditsRemaining))
+      ? Math.max(0, Number(row.creditsRemaining))
+      : current.creditsRemaining;
+    current.lastSeen = current.lastSeen || row.balanceSeenAt || null;
+  }
+
+  for (const row of spendRows) {
+    const current = getExistingUser(row._id, null);
+    if (!current) continue;
+    current.totalConsumed = Math.max(
+      Number(current.totalConsumed || 0),
+      roundNumber(row.totalConsumed, 2)
+    );
+    current.creditEventCount = Number(row.creditEventCount || 0);
+    current.consumed7d = roundNumber(row.consumed7d, 2);
+    current.consumed30d = roundNumber(row.consumed30d, 2);
+    current.firstCreditAt = row.firstCreditAt || null;
+    current.lastCreditAt = row.lastCreditAt || null;
+    current.firstSeen = current.firstSeen || row.firstCreditAt || null;
+    current.lastSeen = current.lastSeen || row.lastCreditAt || null;
+  }
+
+  const topToolMap = new Map();
+  for (const row of topToolRows) {
+    const userId = safeString(row.userId);
+    if (!userId) continue;
+    const entries = topToolMap.get(userId) || [];
+    entries.push({
+      tool: normalizeToolId(row.tool) || safeString(row.tool) || "unknown",
+      timeSpentMs: roundNumber(row.timeSpentMs, 2),
+    });
+    topToolMap.set(userId, entries);
+  }
+
+  for (const [userId, toolRows] of topToolMap.entries()) {
+    const current = getExistingUser(userId, null);
+    if (!current) continue;
+    const sortedTools = toolRows
+      .filter((toolRow) => toolRow && toolRow.tool)
+      .sort((a, b) => Number(b.timeSpentMs || 0) - Number(a.timeSpentMs || 0));
+    const meaningfulTools = sortedTools.filter((toolRow) => !isInternalTool(toolRow.tool));
+    const visibleTools = meaningfulTools.length ? meaningfulTools : sortedTools;
+    current.totalTimeSpentMs = roundNumber(
+      visibleTools.reduce((sum, toolRow) => sum + Number(toolRow.timeSpentMs || 0), 0),
+      2
+    );
+    current.topTools = visibleTools.slice(0, 2);
+  }
+
+  const toolBreakdownMap = new Map();
+  const userCreditToolMap = new Map();
+  for (const row of backendLedgerSpendRows) {
+    if (!row || !row.userId || !row.tool) continue;
+    const current = getExistingUser(row.userId, null);
+    if (!current) continue;
+
+    const userTools = userCreditToolMap.get(current._id) || [];
+    userTools.push({
+      tool: row.tool,
+      totalAmount: roundNumber(row.totalAmount, 2),
+      count: Number(row.count || 0),
+    });
+    userCreditToolMap.set(current._id, userTools);
+
+    const existingTool = toolBreakdownMap.get(row.tool) || {
+      tool: row.tool,
+      count: 0,
+      totalAmount: 0,
+      userIds: new Set(),
+    };
+    existingTool.count += Number(row.count || 0);
+    existingTool.totalAmount += Number(row.totalAmount || 0);
+    existingTool.userIds.add(current._id);
+    toolBreakdownMap.set(row.tool, existingTool);
+  }
+
+  for (const [userId, toolRows] of userCreditToolMap.entries()) {
+    const current = getExistingUser(userId, null);
+    if (!current) continue;
+    const sortedCreditTools = toolRows
+      .filter((toolRow) => toolRow && toolRow.tool && Number(toolRow.totalAmount || 0) > 0)
+      .sort((a, b) => Number(b.totalAmount || 0) - Number(a.totalAmount || 0));
+    current.topCreditTools = sortedCreditTools.slice(0, 2);
+    const ledgerTotal = sortedCreditTools.reduce(
+      (sum, toolRow) => sum + Number(toolRow.totalAmount || 0),
+      0
+    );
+    current.totalConsumed = Math.max(
+      Number(current.totalConsumed || 0),
+      roundNumber(ledgerTotal, 2)
+    );
+  }
+
+  const toolBreakdown = Array.from(toolBreakdownMap.values())
+    .map((row) => ({
+      tool: row.tool,
+      count: Number(row.count || 0),
+      totalAmount: roundNumber(row.totalAmount, 2),
+      userCount: row.userIds.size,
+    }))
+    .filter((row) => Number(row.totalAmount || 0) > 0)
+    .sort((a, b) => {
+      const amountDiff = Number(b.totalAmount || 0) - Number(a.totalAmount || 0);
+      if (amountDiff !== 0) return amountDiff;
+      return Number(b.count || 0) - Number(a.count || 0);
+    });
+
+  const mergedUsers = Array.from(users.values()).map((user) => {
+    const activeDays = Math.max(
+      1,
+      user.firstSeen && user.lastSeen
+        ? (new Date(user.lastSeen).getTime() - new Date(user.firstSeen).getTime()) / 86400000
+        : 1
+    );
+    const estimatedDailyBurn =
+      user.consumed30d > 0
+        ? user.consumed30d / 30
+        : user.consumed7d > 0
+        ? user.consumed7d / 7
+        : user.totalConsumed > 0
+        ? user.totalConsumed / activeDays
+        : 0;
+    const depletionDays = calculateDepletionDays(user.creditsRemaining, estimatedDailyBurn);
+
+    return {
+      ...user,
+      estimatedDailyBurn: roundNumber(estimatedDailyBurn, 2),
+      depletionDays,
+      riskLevel: classifyCreditRisk({
+        creditsRemaining: user.creditsRemaining,
+        depletionDays,
+      }),
+    };
+  });
+
+  mergedUsers.sort((a, b) => {
+    const riskOrder = { critical: 0, warning: 1, healthy: 2 };
+    const riskDiff = (riskOrder[a.riskLevel] || 99) - (riskOrder[b.riskLevel] || 99);
+    if (riskDiff !== 0) return riskDiff;
+    const depletionA = Number.isFinite(a.depletionDays) ? a.depletionDays : Number.MAX_SAFE_INTEGER;
+    const depletionB = Number.isFinite(b.depletionDays) ? b.depletionDays : Number.MAX_SAFE_INTEGER;
+    if (depletionA !== depletionB) return depletionA - depletionB;
+    return Number(b.totalConsumed || 0) - Number(a.totalConsumed || 0);
+  });
+
+  const trackedUsers = mergedUsers.length;
+  const authenticatedUsers = mergedUsers.filter((user) => user.isAuthenticated).length;
+  const anonymousUsers = trackedUsers - authenticatedUsers;
+  const lowCreditUsers = mergedUsers.filter((user) => {
+    if (user.creditsRemaining === null || user.creditsRemaining === undefined) {
+      return false;
+    }
+    const remaining = Number(user.creditsRemaining);
+    return Number.isFinite(remaining) && remaining < RUNOUT_CREDIT_THRESHOLD;
+  }).length;
+  const runoutSoonUsers = mergedUsers.filter((user) => user.riskLevel !== "healthy").length;
+  const creditsConsumedTotal = roundNumber(
+    mergedUsers.reduce((sum, user) => sum + Number(user.totalConsumed || 0), 0),
+    2
+  );
+  const creditsRemainingTotal = roundNumber(
+    mergedUsers.reduce((sum, user) => sum + Number(user.creditsRemaining || 0), 0),
+    2
+  );
+  const averageDailyBurn = roundNumber(
+    trackedUsers > 0
+      ? mergedUsers.reduce((sum, user) => sum + Number(user.estimatedDailyBurn || 0), 0) / trackedUsers
+      : 0,
+    2
+  );
+
+  const topPowerUsers = mergedUsers
+    .filter((user) => Number(user.totalTimeSpentMs || 0) > 0)
+    .sort((a, b) => Number(b.totalTimeSpentMs || 0) - Number(a.totalTimeSpentMs || 0))
+    .slice(0, 8);
+
+  const newsletter = buildCreditNewsletterPreview({
+    summary: {
+      trackedUsers,
+      lowCreditUsers,
+      runoutSoonUsers,
+      creditsConsumedTotal,
+    },
+    users: mergedUsers,
+    toolBreakdown,
+    topPowerUsers,
+  });
+
+  return {
+    summary: {
+      trackedUsers,
+      authenticatedUsers,
+      anonymousUsers,
+      lowCreditUsers,
+      runoutSoonUsers,
+      creditsConsumedTotal,
+      creditsRemainingTotal,
+      averageDailyBurn,
+    },
+    users: mergedUsers,
+    toolBreakdown,
+    topPowerUsers,
+    newsletter,
+  };
+}
+
+function escapeHtmlFragment(value) {
+  return String(value === null || value === undefined ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function buildCreditNewsletterPreview(intelligence) {
+  const users = Array.isArray(intelligence.users) ? intelligence.users : [];
+  const toolBreakdown = Array.isArray(intelligence.toolBreakdown)
+    ? intelligence.toolBreakdown
+    : [];
+  const runoutCandidates = users.filter((user) => user.riskLevel !== "healthy").slice(0, 10);
+  const topPowerUsers = Array.isArray(intelligence.topPowerUsers)
+    ? intelligence.topPowerUsers
+    : [];
+  const recipients = parseEmailList(CREDIT_NEWSLETTER_TO);
+  const subject = `Waysorted credit digest: ${runoutCandidates.length} at-risk users, ${intelligence.summary.creditsConsumedTotal} credits spent`;
+
+  const textLines = [
+    "Waysorted credit digest",
+    "",
+    `Tracked users: ${intelligence.summary.trackedUsers}`,
+    `Low-credit users: ${intelligence.summary.lowCreditUsers}`,
+    `Runout-soon users: ${intelligence.summary.runoutSoonUsers}`,
+    `Credits consumed: ${intelligence.summary.creditsConsumedTotal}`,
+    "",
+    "Runout candidates:",
+    ...(runoutCandidates.length
+      ? runoutCandidates.map((user) => {
+          const label = user.name || user.email || user._id;
+          const topTool = user.topTools && user.topTools[0] ? getToolLabel(user.topTools[0].tool) : "Unknown";
+          return `- ${label}: ${user.creditsRemaining ?? "?"} credits left, ${user.depletionDays ?? "?"} days left, top tool ${topTool}`;
+        })
+      : ["- None"]),
+    "",
+    "Top tool spend:",
+    ...(toolBreakdown.length
+      ? toolBreakdown.slice(0, 5).map((row) => `- ${getToolLabel(row.tool)}: ${row.totalAmount} credits across ${row.count} ledger entries`)
+      : ["- No attributed ledger spend yet"]),
+    "",
+    "Power users by time spent:",
+    ...(topPowerUsers.length
+      ? topPowerUsers.map((user) => {
+          const label = user.name || user.email || user._id;
+          const topTool = user.topTools && user.topTools[0] ? user.topTools[0].tool : "unknown";
+          const minutes = roundNumber(Number(user.totalTimeSpentMs || 0) / 60000, 1);
+          return `- ${label}: ${minutes} min, top tool ${topTool}`;
+        })
+      : ["- No time-spent data yet"]),
+  ];
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;color:#0f172a;line-height:1.5">
+      <h1 style="margin-bottom:8px">Waysorted credit digest</h1>
+      <p style="margin-top:0;color:#475569">
+        ${intelligence.summary.lowCreditUsers} low-credit users, ${intelligence.summary.runoutSoonUsers} users likely to run out soon,
+        ${intelligence.summary.creditsConsumedTotal} total credits consumed.
+      </p>
+      <h2>Runout candidates</h2>
+      <ul>
+        ${
+          runoutCandidates.length
+            ? runoutCandidates
+                .map((user) => {
+                  const label = escapeHtmlFragment(user.name || user.email || user._id);
+                  const topTool = escapeHtmlFragment(
+                    user.topTools && user.topTools[0] ? getToolLabel(user.topTools[0].tool) : "Unknown"
+                  );
+                  return `<li><strong>${label}</strong>: ${user.creditsRemaining ?? "?"} credits left, ${
+                    user.depletionDays ?? "?"
+                  } estimated days left, top tool ${topTool}</li>`;
+                })
+                .join("")
+            : "<li>No users currently look at risk.</li>"
+        }
+      </ul>
+      <h2>Top tool spend</h2>
+      <ul>
+        ${
+          toolBreakdown.length
+            ? toolBreakdown
+                .slice(0, 5)
+                .map(
+                  (row) =>
+                    `<li><strong>${escapeHtmlFragment(getToolLabel(row.tool))}</strong>: ${row.totalAmount} credits across ${row.count} ledger entries</li>`
+                )
+                .join("")
+            : "<li>No attributed ledger spend yet.</li>"
+        }
+      </ul>
+      <h2>Power users by time spent</h2>
+      <ul>
+        ${
+          topPowerUsers.length
+            ? topPowerUsers
+                .map((user) => {
+                  const label = escapeHtmlFragment(user.name || user.email || user._id);
+                  const topTool = escapeHtmlFragment(
+                    user.topTools && user.topTools[0] ? getToolLabel(user.topTools[0].tool) : "Unknown"
+                  );
+                  const minutes = roundNumber(Number(user.totalTimeSpentMs || 0) / 60000, 1);
+                  return `<li><strong>${label}</strong>: ${minutes} minutes, top tool ${topTool}</li>`;
+                })
+                .join("")
+            : "<li>No tool time data yet.</li>"
+        }
+      </ul>
+    </div>
+  `;
+
+  return {
+    subject,
+    text: textLines.join("\n"),
+    html,
+    recipients,
+    runoutCandidates,
+    topToolSpend: toolBreakdown.slice(0, 5),
+    powerUsers: topPowerUsers,
+    canSend: Boolean(RESEND_API_KEY && CREDIT_NEWSLETTER_FROM && recipients.length > 0),
+  };
+}
+
+async function sendCreditNewsletter(preview, options = {}) {
+  const recipients = Array.isArray(options.to) && options.to.length
+    ? options.to
+    : Array.isArray(preview.recipients)
+    ? preview.recipients
+    : [];
+
+  if (!RESEND_API_KEY) {
+    return { sent: false, reason: "RESEND_API_KEY is not configured" };
+  }
+  if (!CREDIT_NEWSLETTER_FROM) {
+    return { sent: false, reason: "CREDIT_NEWSLETTER_FROM is not configured" };
+  }
+  if (!recipients.length) {
+    return { sent: false, reason: "No newsletter recipients configured" };
+  }
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+      "Idempotency-Key": `waysorted-credit-digest-${new Date().toISOString().slice(0, 10)}`,
+    },
+    body: JSON.stringify({
+      from: CREDIT_NEWSLETTER_FROM,
+      to: recipients,
+      subject: preview.subject,
+      html: preview.html,
+      text: preview.text,
+    }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return {
+      sent: false,
+      reason: payload && payload.message ? payload.message : `Resend request failed (${response.status})`,
+    };
+  }
+
+  return {
+    sent: true,
+    recipients,
+    id: payload && payload.id ? payload.id : null,
+  };
 }
 
 function resolveEventAction(event) {
@@ -2149,6 +3607,7 @@ app.get("/api/plugin-analytics/features", async (req, res) => {
 app.get("/api/plugin-analytics/dashboard", async (req, res) => {
   try {
     const eventsCollection = await getEventsCollection();
+    const engagementCollection = await getEngagementCollection();
     const { match, from, to } = buildMatch(req.query);
     const { match: baseMatch } = buildMatch(req.query, { includeAction: false });
     const toolFilter = safeString(req.query.tool, 120);
@@ -2161,7 +3620,7 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
     const sessionsLimit = parseLimit(req.query.sessionsLimit, 60, 300);
     const recentEventsLimit = parseLimit(req.query.eventsLimit, 100, 1000);
 
-    const [summary, tools, heatmap, sessions, events, eventTypeBreakdown, actionCatalog] = await Promise.all([
+    const [summary, tools, heatmap, sessions, events, eventTypeBreakdown, actionCatalog, creditIntelligence, publicStats] = await Promise.all([
       fetchSummaryData(eventsCollection, match),
       fetchToolUsageData(eventsCollection, match),
       fetchHeatmapData(eventsCollection, match, {
@@ -2175,6 +3634,8 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
       fetchRecentEventsData(eventsCollection, match, recentEventsLimit),
       fetchEventTypeBreakdown(eventsCollection, match),
       fetchActionCatalog(eventsCollection, baseMatch),
+      fetchCreditIntelligence(eventsCollection),
+      computePublicStatsMetrics(eventsCollection, engagementCollection),
     ]);
 
     return res.json({
@@ -2187,6 +3648,12 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
       heatmap,
       sessions: { sessions },
       recentEvents: { events },
+      creditIntelligence: {
+        summary: creditIntelligence.summary,
+        topPowerUsers: creditIntelligence.topPowerUsers,
+        newsletter: creditIntelligence.newsletter,
+      },
+      publicStats,
     });
   } catch (error) {
     console.error("Dashboard query failed:", error);
@@ -2227,52 +3694,8 @@ app.get("/api/plugin-analytics/mau", readAuthGate, async (req, res) => {
 app.get("/api/plugin-analytics/credit-consumption", readAuthGate, async (req, res) => {
   try {
     const eventsCollection = await getEventsCollection();
-    
-    // Aggregate credit consumptions and get latest credits remaining per user
-    const pipeline = [
-      {
-        $match: {
-          $or: [
-            { eventType: "credit_consumed" },
-            { "user.creditsRemaining": { $exists: true, $ne: null } }
-          ]
-        }
-      },
-      {
-        $sort: { eventAt: -1 }
-      },
-      {
-        $group: {
-          _id: {
-            $cond: [
-              { $eq: ["$user.isAuthenticated", true] },
-              "$user.userId",
-              "$user.anonymousId"
-            ]
-          },
-          name: { $first: "$user.name" },
-          email: { $first: "$user.email" },
-          creditsRemaining: { $first: "$user.creditsRemaining" },
-          totalConsumed: {
-            $sum: {
-              $cond: [{ $eq: ["$eventType", "credit_consumed"] }, 1, 0]
-            }
-          },
-          lastSeen: { $first: "$eventAt" }
-        }
-      },
-      {
-        $match: {
-          _id: { $ne: null }
-        }
-      },
-      {
-        $sort: { totalConsumed: -1, lastSeen: -1 }
-      }
-    ];
-
-    const users = await eventsCollection.aggregate(pipeline).toArray();
-    res.json({ users });
+    const intelligence = await fetchCreditIntelligence(eventsCollection);
+    res.json({ users: intelligence.users });
   } catch (error) {
     console.error("Credit consumption query failed:", error);
     res.status(500).json({ error: "Failed to load credit consumption" });
@@ -2282,63 +3705,15 @@ app.get("/api/plugin-analytics/credit-consumption", readAuthGate, async (req, re
 app.get("/api/plugin-analytics/user-top-tools", readAuthGate, async (req, res) => {
   try {
     const eventsCollection = await getEventsCollection();
-    
-    const pipeline = [
-      {
-        $match: {
-          eventType: "tool_time_spent",
-          "payload.durationMs": { $type: "number" }
-        }
-      },
-      {
-        $group: {
-          _id: {
-            user: {
-              $cond: [
-                { $eq: ["$user.isAuthenticated", true] },
-                "$user.userId",
-                "$user.anonymousId"
-              ]
-            },
-            tool: "$tool"
-          },
-          totalTimeMs: { $sum: "$payload.durationMs" },
-          name: { $first: "$user.name" },
-          email: { $first: "$user.email" }
-        }
-      },
-      {
-        $match: {
-          "_id.user": { $ne: null },
-          "_id.tool": { $ne: "unknown" }
-        }
-      },
-      {
-        $sort: { "_id.user": 1, totalTimeMs: -1 }
-      },
-      {
-        $group: {
-          _id: "$_id.user",
-          name: { $first: "$name" },
-          email: { $first: "$email" },
-          topTools: {
-            $push: {
-              tool: "$_id.tool",
-              timeSpentMs: "$totalTimeMs"
-            }
-          }
-        }
-      },
-      {
-        $project: {
-          name: 1,
-          email: 1,
-          topTools: { $slice: ["$topTools", 2] }
-        }
-      }
-    ];
-
-    const users = await eventsCollection.aggregate(pipeline).toArray();
+    const intelligence = await fetchCreditIntelligence(eventsCollection);
+    const users = intelligence.users
+      .filter((user) => Array.isArray(user.topTools) && user.topTools.length > 0)
+      .map((user) => ({
+        _id: user._id,
+        name: user.name || null,
+        email: user.email || null,
+        topTools: user.topTools,
+      }));
     res.json({ users });
   } catch (error) {
     console.error("User top tools query failed:", error);
@@ -2346,33 +3721,62 @@ app.get("/api/plugin-analytics/user-top-tools", readAuthGate, async (req, res) =
   }
 });
 
+app.get("/api/plugin-analytics/credit-intelligence", readAuthGate, async (_req, res) => {
+  try {
+    const eventsCollection = await getEventsCollection();
+    const intelligence = await fetchCreditIntelligence(eventsCollection);
+    res.json(intelligence);
+  } catch (error) {
+    console.error("Credit intelligence query failed:", error);
+    res.status(500).json({ error: "Failed to load credit intelligence" });
+  }
+});
+
+app.get("/api/plugin-analytics/newsletter/runout-preview", readAuthGate, async (_req, res) => {
+  try {
+    const eventsCollection = await getEventsCollection();
+    const intelligence = await fetchCreditIntelligence(eventsCollection);
+    res.json(intelligence.newsletter);
+  } catch (error) {
+    console.error("Credit newsletter preview failed:", error);
+    res.status(500).json({ error: "Failed to build newsletter preview" });
+  }
+});
+
+app.post("/api/plugin-analytics/newsletter/runout-send", readAuthGate, async (req, res) => {
+  try {
+    const eventsCollection = await getEventsCollection();
+    const intelligence = await fetchCreditIntelligence(eventsCollection);
+    const recipients = parseEmailList(req.body && req.body.to ? req.body.to : null);
+    const result = await sendCreditNewsletter(intelligence.newsletter, {
+      to: recipients.length ? recipients : intelligence.newsletter.recipients,
+    });
+    res.json({
+      ...result,
+      preview: intelligence.newsletter,
+    });
+  } catch (error) {
+    console.error("Credit newsletter send failed:", error);
+    res.status(500).json({ error: "Failed to send newsletter" });
+  }
+});
+
 app.get("/api/plugin-analytics/stats", async (req, res) => {
   try {
-    const engagementCollection = await getEngagementCollection();
-    const stats = await engagementCollection.findOne({ _id: "global_stats" }) || {
-      likes: 0, saves: 0, follows: 0, installs: 0, reused: 0
-    };
-    
-    // Get MAU dynamically for the stats page
     const eventsCollection = await getEventsCollection();
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const authMAU = await eventsCollection.distinct("user.userId", { eventAt: { $gte: thirtyDaysAgo }, "user.isAuthenticated": true });
-    const anonMAU = await eventsCollection.distinct("user.anonymousId", { eventAt: { $gte: thirtyDaysAgo }, "user.isAuthenticated": false });
-    
-    stats.mau = authMAU.length + anonMAU.length;
-    stats.installs = Math.max(stats.installs || 0, stats.mau); // Ensure installs >= MAU loosely
+    const engagementCollection = await getEngagementCollection();
+    const stats = await computePublicStatsMetrics(eventsCollection, engagementCollection);
+    const history = await buildPublicStatsHistory(eventsCollection, "7d");
+    const today = history[history.length - 1] || null;
+    const yesterday = history.length > 1 ? history[history.length - 2] : null;
 
-    // Add deltas from yesterday's snapshot
-    const snapshotsCollection = await getSnapshotsCollection();
-    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    const yesterdaySnap = await snapshotsCollection.findOne({ _id: yesterday });
-    if (yesterdaySnap) {
+    if (today && yesterday) {
       stats.deltas = {
-        mau: stats.mau - (yesterdaySnap.mau || 0),
-        likes: (stats.likes || 0) - (yesterdaySnap.likes || 0),
-        saves: (stats.saves || 0) - (yesterdaySnap.saves || 0),
-        follows: (stats.follows || 0) - (yesterdaySnap.follows || 0),
-        reuses: (stats.reused || 0) - (yesterdaySnap.reuses || 0),
+        mau: Number(today.mau || 0) - Number(yesterday.mau || 0),
+        likes: Number(today.likes || 0) - Number(yesterday.likes || 0),
+        saves: Number(today.saves || 0) - Number(yesterday.saves || 0),
+        follows: Number(today.follows || 0) - Number(yesterday.follows || 0),
+        reused: Number(today.reuses || today.reused || 0) - Number(yesterday.reuses || yesterday.reused || 0),
       };
     } else {
       stats.deltas = null;
@@ -2394,8 +3798,14 @@ app.post("/api/plugin-analytics/stats/:action", async (req, res) => {
     }
 
     const engagementCollection = await getEngagementCollection();
-    
-    const incrementField = action + "s";
+    const incrementFieldMap = {
+      like: "likes",
+      save: "saves",
+      follow: "follows",
+      install: "installs",
+      reuse: "reused",
+    };
+    const incrementField = incrementFieldMap[action];
     const updateQuery = { $inc: { [incrementField]: 1 } };
     
     await engagementCollection.updateOne(
@@ -2413,25 +3823,10 @@ app.post("/api/plugin-analytics/stats/:action", async (req, res) => {
 
 app.get("/api/plugin-analytics/stats/history", async (req, res) => {
   try {
-    const snapshotsCollection = await getSnapshotsCollection();
+    const eventsCollection = await getEventsCollection();
     const range = safeString(req.query.range, 10) || "90d";
-    const rangeMap = {
-      "7d": 7,
-      "30d": 30,
-      "90d": 90,
-      "180d": 180,
-      "365d": 365,
-    };
-    const days = rangeMap[range] || null;
-    const query = {};
-    if (days) {
-      query.date = { $gte: new Date(Date.now() - days * 24 * 60 * 60 * 1000) };
-    }
-    const snapshots = await snapshotsCollection
-      .find(query)
-      .sort({ date: 1 })
-      .toArray();
-    res.json(snapshots);
+    const history = await buildPublicStatsHistory(eventsCollection, range);
+    res.json(history);
   } catch (error) {
     console.error("Stats history query failed:", error);
     res.status(500).json({ error: "Failed to load stats history" });
@@ -2440,16 +3835,11 @@ app.get("/api/plugin-analytics/stats/history", async (req, res) => {
 
 app.get("/api/plugin-analytics/stats/deltas", readAuthGate, async (req, res) => {
   try {
-    const snapshotsCollection = await getSnapshotsCollection();
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const yesterdayStr = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    const lastWeekStr = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-
-    const [today, yesterday, lastWeek] = await Promise.all([
-      snapshotsCollection.findOne({ _id: todayStr }),
-      snapshotsCollection.findOne({ _id: yesterdayStr }),
-      snapshotsCollection.findOne({ _id: lastWeekStr }),
-    ]);
+    const eventsCollection = await getEventsCollection();
+    const history = await buildPublicStatsHistory(eventsCollection, "30d");
+    const today = history[history.length - 1] || null;
+    const yesterday = history.length > 1 ? history[history.length - 2] : null;
+    const lastWeek = history.length > 7 ? history[history.length - 8] : null;
 
     const metricKeys = ["mau", "authenticatedUsers", "likes", "saves", "follows", "reuses", "creditsConsumed", "activeSessions"];
     function extractMetrics(snap) {
@@ -2492,37 +3882,8 @@ app.get("/api/plugin-analytics/stats/deltas", readAuthGate, async (req, res) => 
 app.get("/api/plugin-analytics/credit-consumption/by-tool", readAuthGate, async (req, res) => {
   try {
     const eventsCollection = await getEventsCollection();
-    const tools = await eventsCollection
-      .aggregate([
-        { $match: { eventType: "credit_consumed" } },
-        {
-          $group: {
-            _id: "$tool",
-            count: { $sum: 1 },
-            totalAmount: {
-              $sum: {
-                $convert: {
-                  input: "$payload.amount",
-                  to: "double",
-                  onError: 1,
-                  onNull: 1,
-                },
-              },
-            },
-          },
-        },
-        {
-          $project: {
-            _id: 0,
-            tool: "$_id",
-            count: 1,
-            totalAmount: { $round: ["$totalAmount", 2] },
-          },
-        },
-        { $sort: { count: -1 } },
-      ])
-      .toArray();
-    res.json({ tools });
+    const intelligence = await fetchCreditIntelligence(eventsCollection);
+    res.json({ tools: intelligence.toolBreakdown });
   } catch (error) {
     console.error("Credit consumption by tool query failed:", error);
     res.status(500).json({ error: "Failed to load credit consumption by tool" });

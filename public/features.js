@@ -169,8 +169,12 @@ function getQueryParams() {
   return params
 }
 
+function resolveApiPath(path) {
+  return new URL(path, `${window.location.protocol}//${window.location.host}`).toString()
+}
+
 async function fetchJson(path) {
-  const response = await fetch(path)
+  const response = await fetch(resolveApiPath(path))
   if (!response.ok) {
     const text = await response.text()
     throw new Error(`${response.status} ${response.statusText} - ${text}`)

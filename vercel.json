@@ -6,6 +6,12 @@
       "maxDuration": 60
     }
   },
+  "crons": [
+    {
+      "path": "/api/ops/credit-digest",
+      "schedule": "0 5 * * *"
+    }
+  ],
   "routes": [
     {
       "src": "/(.*)",
