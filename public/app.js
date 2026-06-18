@@ -1,6 +1,9 @@
 const statusLine = document.getElementById("statusLine")
 const kpiGrid = document.getElementById("kpiGrid")
 const insightsGrid = document.getElementById("insightsGrid")
+const funnelBody = document.getElementById("funnelBody")
+const funnelMeta = document.getElementById("funnelMeta")
+const dropoffBody = document.getElementById("dropoffBody")
 const actionsBody = document.getElementById("actionsBody")
 const sessionsBody = document.getElementById("sessionsBody")
 const eventsBody = document.getElementById("eventsBody")
@@ -1496,6 +1499,106 @@ function renderInsights(analysis) {
     .join("")
 }
 
+function renderFunnel(funnel) {
+  const stages = Array.isArray(funnel && funnel.stages) ? funnel.stages : []
+  const dropOffStages = Array.isArray(funnel && funnel.dropOffStages)
+    ? funnel.dropOffStages
+    : []
+  const failureSignals = Array.isArray(funnel && funnel.failureSignals)
+    ? funnel.failureSignals
+    : []
+  const stalledUsers = Array.isArray(funnel && funnel.stalledUsers)
+    ? funnel.stalledUsers
+    : []
+
+  if (!stages.length) {
+    funnelMeta.textContent = ""
+    funnelBody.innerHTML = `<p class="card-copy">No funnel data in this range.</p>`
+    dropoffBody.innerHTML = `<p class="card-copy">No drop-off signals yet.</p>`
+    return
+  }
+
+  funnelMeta.textContent = `${numberLabel(funnel.totalEventsScanned || 0)} events scanned`
+  funnelBody.innerHTML = stages
+    .map((stage) => {
+      const width = Math.max(Math.min(Number(stage.conversionRate || 0) * 100, 100), 2)
+      const dropText = stage.previousCount === null
+        ? "Entry stage"
+        : `${numberLabel(stage.dropOff || 0)} dropped from previous stage`
+      return `
+        <div class="funnel-row">
+          <div class="funnel-row-header">
+            <span>${escapeHtml(stage.label)}</span>
+            <strong>${numberLabel(stage.count || 0)}</strong>
+          </div>
+          <div class="funnel-bar" aria-label="${escapeHtml(stage.label)} ${percentLabel(stage.conversionRate || 0)}">
+            <span style="width: ${width}%"></span>
+          </div>
+          <div class="funnel-row-meta">
+            <span>${escapeHtml(stage.description || "")}</span>
+            <span>${escapeHtml(percentLabel(stage.conversionRate || 0))} of active • ${escapeHtml(dropText)}</span>
+          </div>
+        </div>
+      `
+    })
+    .join("")
+
+  const topDrop = dropOffStages[0] || null
+  const dropRows = topDrop
+    ? [
+        `<div class="dropoff-callout">
+          <p class="insight-title">Largest Drop-off</p>
+          <p class="insight-value">${escapeHtml(topDrop.label)}</p>
+          <p class="insight-text">${numberLabel(topDrop.dropOff || 0)} users lost • ${percentLabel(topDrop.dropOffRate || 0)} from previous stage</p>
+        </div>`,
+      ]
+    : []
+
+  if (failureSignals.length) {
+    dropRows.push(`
+      <div class="dropoff-section">
+        <p class="insight-title">Failure / Block Signals</p>
+        ${failureSignals
+          .map(
+            (signal) => `
+              <div class="dropoff-line">
+                <span>${escapeHtml(signal.label || signal.key)}</span>
+                <strong>${numberLabel(signal.count || 0)}</strong>
+              </div>
+            `
+          )
+          .join("")}
+      </div>
+    `)
+  }
+
+  if (stalledUsers.length) {
+    const sample = stalledUsers.slice(0, 5)
+    dropRows.push(`
+      <div class="dropoff-section">
+        <p class="insight-title">Recent Stalled Users</p>
+        ${sample
+          .map(
+            (user) => `
+              <div class="dropoff-line">
+                <span title="${escapeHtml(user.identity || "")}">
+                  ${escapeHtml(labelTool(user.lastTool || "unknown"))}
+                  <small>${escapeHtml(user.stage || "active_users")}${user.failed ? " • failed" : ""}</small>
+                </span>
+                <strong>${escapeHtml(user.lastEventType || "-")}</strong>
+              </div>
+            `
+          )
+          .join("")}
+      </div>
+    `)
+  }
+
+  dropoffBody.innerHTML = dropRows.length
+    ? dropRows.join("")
+    : `<p class="card-copy">No visible drop-off in this range.</p>`
+}
+
 function renderTopActions(actions, totalEvents) {
   const rows = (actions || [])
     .map((item) => {
@@ -1973,6 +2076,7 @@ async function loadDashboard(options = {}) {
       eventTypeBreakdown: dashboard.eventTypeBreakdown || [],
       eventsByDay: summary.eventsByDay || [],
       toolUsage: toolUsage.tools || [],
+      funnel: dashboard.funnel || {},
       heatmap: dashboard.heatmap || {},
       sessions: sessions.sessions || [],
       events: recentEvents.events || [],
@@ -1988,6 +2092,7 @@ async function loadDashboard(options = {}) {
 
     renderKpis(summary.kpis || {}, analysis)
     renderInsights(analysis)
+    renderFunnel(dashboard.funnel || {})
     renderTopActions(summary.topActions || [], Number(summary.kpis && summary.kpis.totalEvents))
     renderToolChart(toolUsage.tools || [])
     renderDailyChart(summary.eventsByDay || [])

@@ -422,6 +422,94 @@ h2 {
   color: var(--muted);
 }
 
+.funnel-card {
+  min-height: 320px;
+}
+
+.funnel-list {
+  display: grid;
+  gap: 12px;
+}
+
+.funnel-row {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: rgba(9, 18, 36, 0.48);
+}
+
+.funnel-row-header,
+.funnel-row-meta,
+.dropoff-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.funnel-row-header span,
+.dropoff-line span {
+  font-weight: 700;
+}
+
+.funnel-row-meta {
+  align-items: flex-start;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.funnel-bar {
+  height: 9px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(156, 182, 255, 0.12);
+}
+
+.funnel-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  box-shadow: 0 0 18px rgba(93, 155, 255, 0.38);
+}
+
+.dropoff-callout,
+.dropoff-section {
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: rgba(9, 18, 36, 0.48);
+}
+
+.dropoff-callout {
+  border-color: rgba(255, 180, 84, 0.38);
+}
+
+.dropoff-section {
+  display: grid;
+  gap: 9px;
+}
+
+.dropoff-line {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dropoff-line strong {
+  color: var(--text);
+  font-size: 12px;
+  text-align: right;
+}
+
+.dropoff-line small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
 .details-section + .details-section {
   margin-top: 12px;
 }

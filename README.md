@@ -26,6 +26,7 @@ Set required env values in `.env`:
 - `PORT` (optional, defaults to `4080`)
 - `ANALYTICS_INGEST_TOKEN` (optional but recommended)
 - `ANALYTICS_INGEST_TOKEN_REQUIRED` (`false` by default; set `true` to enforce token)
+- `ANALYTICS_STORE_PASSIVE_EVENTS` (`false` by default; set `true` only for temporary telemetry debugging)
 - `CRON_SECRET` (recommended if you enable the automated digest cron)
 - `RUNOUT_CREDIT_THRESHOLD` (optional, default `50`; users below this are flagged low-credit)
 - `RUNOUT_CREDIT_DAYS` (optional, default `14`)
@@ -61,6 +62,7 @@ Set these env vars in Vercel Project Settings:
 - `MONGODB_URI` (or one of the fallback URI names listed above)
 - `MONGODB_DB` (optional)
 - `ANALYTICS_INGEST_TOKEN` (recommended)
+- `ANALYTICS_STORE_PASSIVE_EVENTS` (optional; keep `false` for clean production analytics)
 - `CRON_SECRET`
 - Optional credit digest delivery:
   - `RUNOUT_CREDIT_THRESHOLD`
@@ -122,6 +124,12 @@ If you need strict enforcement, set:
 ```text
 ANALYTICS_INGEST_TOKEN_REQUIRED=true
 ```
+
+Passive/system events such as heartbeats, resize, visibility, and analytics
+transport messages are dropped at ingest by default. Ingest responses include
+`accepted`, `stored`, `inserted`, `dropped`, and `dropReasons` counts so noisy
+plugin builds can be detected without storing the noise. Set
+`ANALYTICS_STORE_PASSIVE_EVENTS=true` only when debugging telemetry transport.
 
 ## 4) API Endpoints
 

@@ -281,6 +281,154 @@ test("Dashboard APIs", async (t) => {
     assert.strictEqual(ingestedUser.totalConsumed, 4);
   });
 
+  await t.test("POST /api/plugin-analytics/ingest drops passive noise", async () => {
+    const ingestRes = await request(app)
+      .post("/api/plugin-analytics/ingest")
+      .send({
+        source: "test-suite",
+        sessionId: "session-noise-ingest",
+        deviceId: "device-noise-ingest",
+        sentAt: now.toISOString(),
+        events: [
+          {
+            eventType: "ui_heartbeat",
+            eventAt: now.toISOString(),
+            tool: "dashboard",
+            payload: { queueDepth: 0 },
+          },
+          {
+            eventType: "analytics_transport_updated",
+            eventAt: now.toISOString(),
+            tool: "dashboard",
+            payload: {},
+          },
+          {
+            eventType: "ui_click",
+            eventAt: now.toISOString(),
+            tool: "palettable",
+            payload: { action: "toggle-palette" },
+          },
+          {
+            eventType: "ui_click",
+            eventAt: now.toISOString(),
+            tool: "dashboard",
+            payload: { action: "analytics-flush" },
+          },
+        ],
+      });
+
+    assert.strictEqual(ingestRes.status, 202);
+    assert.strictEqual(ingestRes.body.accepted, 4);
+    assert.strictEqual(ingestRes.body.stored, 1);
+    assert.strictEqual(ingestRes.body.inserted, 1);
+    assert.strictEqual(ingestRes.body.dropped, 3);
+    assert.strictEqual(ingestRes.body.dropReasons.passive_event_type, 2);
+    assert.strictEqual(ingestRes.body.dropReasons.passive_action, 1);
+
+    const storedEvents = await eventsColl
+      .find({ sessionId: "session-noise-ingest" })
+      .toArray();
+    assert.strictEqual(storedEvents.length, 1);
+    assert.strictEqual(storedEvents[0].eventType, "ui_click");
+    assert.strictEqual(storedEvents[0].payload.action, "toggle-palette");
+    assert.strictEqual(storedEvents[0].quality.passive, false);
+
+    await eventsColl.deleteMany({ sessionId: "session-noise-ingest" });
+  });
+
+  await t.test("GET /api/plugin-analytics/funnel tracks drop-off from cleaned events", async () => {
+    const funnelStart = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
+    const funnelEnd = new Date(funnelStart.getTime() + 10 * 1000);
+
+    await eventsColl.insertMany([
+      {
+        eventType: "ui_click",
+        eventAt: funnelStart,
+        sessionId: "session-funnel-convert",
+        tool: "palettable",
+        payload: { action: "toggle-palette" },
+        quality: { passive: false, reason: null },
+        user: {
+          isAuthenticated: true,
+          userId: "funnel-user-convert",
+          name: "Funnel Convert",
+        },
+      },
+      {
+        eventType: "palette_export_performed",
+        eventAt: new Date(funnelStart.getTime() + 1000),
+        sessionId: "session-funnel-convert",
+        tool: "palettable",
+        payload: { action: "export-palette" },
+        quality: { passive: false, reason: null },
+        user: {
+          isAuthenticated: true,
+          userId: "funnel-user-convert",
+          name: "Funnel Convert",
+        },
+      },
+      {
+        eventType: "ui_click",
+        eventAt: new Date(funnelStart.getTime() + 2000),
+        sessionId: "session-funnel-stalled",
+        tool: "import-tool",
+        payload: { action: "toggle-import-tool" },
+        quality: { passive: false, reason: null },
+        user: {
+          isAuthenticated: true,
+          userId: "funnel-user-stalled",
+          name: "Funnel Stalled",
+        },
+      },
+      {
+        eventType: "tool_usage_failed",
+        eventAt: new Date(funnelStart.getTime() + 3000),
+        sessionId: "session-funnel-failed",
+        tool: "unit-converter",
+        payload: { reason: "processor_failed" },
+        quality: { passive: false, reason: null },
+        user: {
+          isAuthenticated: true,
+          userId: "funnel-user-failed",
+          name: "Funnel Failed",
+        },
+      },
+    ]);
+
+    const query = `from=${encodeURIComponent(funnelStart.toISOString())}&to=${encodeURIComponent(funnelEnd.toISOString())}`;
+    const res = await request(app)
+      .get(`/api/plugin-analytics/funnel?${query}`)
+      .set("Authorization", authString);
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.body.totalEventsScanned, 4);
+    assert.strictEqual(res.body.stages.find((stage) => stage.key === "active_users").count, 3);
+    assert.strictEqual(res.body.stages.find((stage) => stage.key === "tool_navigation").count, 3);
+    assert.strictEqual(res.body.stages.find((stage) => stage.key === "meaningful_action").count, 3);
+    assert.strictEqual(res.body.stages.find((stage) => stage.key === "conversion").count, 1);
+    assert.strictEqual(res.body.topDropOff.key, "conversion");
+    assert.strictEqual(res.body.topDropOff.dropOff, 2);
+    assert.ok(res.body.failureSignals.some((signal) => signal.key === "tool_usage_failed" && signal.count === 1));
+
+    const dashboardRes = await request(app)
+      .get(`/api/plugin-analytics/dashboard?${query}`)
+      .set("Authorization", authString);
+
+    assert.strictEqual(dashboardRes.status, 200);
+    assert.strictEqual(dashboardRes.body.funnel.stages.length, 4);
+    assert.strictEqual(dashboardRes.body.funnel.topDropOff.key, "conversion");
+
+    await eventsColl.deleteMany({
+      sessionId: {
+        $in: [
+          "session-funnel-convert",
+          "session-funnel-stalled",
+          "session-funnel-failed",
+        ],
+      },
+    });
+  });
+
   await t.test("GET /api/plugin-analytics/user-top-tools", async () => {
     const res = await request(app)
       .get("/api/plugin-analytics/user-top-tools")

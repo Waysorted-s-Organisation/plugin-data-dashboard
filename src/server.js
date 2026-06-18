@@ -32,6 +32,7 @@ const INGEST_TOKEN_REQUIRED =
     .toLowerCase() === "true";
 const READ_USER = (process.env.DASHBOARD_BASIC_AUTH_USER || "").trim();
 const READ_PASS = (process.env.DASHBOARD_BASIC_AUTH_PASS || "").trim();
+const STORE_PASSIVE_EVENTS = parseBool(process.env.ANALYTICS_STORE_PASSIVE_EVENTS, false);
 let initializationPromise = null;
 let isInitialized = false;
 const PASSIVE_EVENT_TYPES = [
@@ -631,6 +632,30 @@ function isPassiveEventType(eventType) {
   return PASSIVE_EVENT_TYPE_SET.has(normalized);
 }
 
+function evaluateEventQuality(eventType, payload) {
+  const payloadObj = payload && typeof payload === "object" ? payload : {};
+  const action = safeString(
+    payloadObj.action ||
+      payloadObj.messageType ||
+      payloadObj.interactionAction ||
+      payloadObj.type,
+    120
+  );
+  const normalizedAction = action ? action.trim().toLowerCase() : null;
+
+  if (isPassiveEventType(eventType)) {
+    return { passive: true, drop: !STORE_PASSIVE_EVENTS, reason: "passive_event_type" };
+  }
+  if (normalizedAction && isPassiveActionKey(normalizedAction)) {
+    return { passive: true, drop: !STORE_PASSIVE_EVENTS, reason: "passive_action" };
+  }
+  if (normalizedAction && normalizedAction.startsWith("analytics-")) {
+    return { passive: true, drop: !STORE_PASSIVE_EVENTS, reason: "analytics_transport" };
+  }
+
+  return { passive: false, drop: false, reason: null };
+}
+
 function buildFeatureDefinitions() {
   const actionDefinitions = Object.keys(ACTION_TO_TOOL)
     .filter((actionKey) => !isPassiveActionKey(actionKey))
@@ -848,6 +873,83 @@ function normalizeUser(user, fallbackAnonymousSeed = null) {
       ? Math.max(0, creditsRemainingValue)
       : null,
   };
+}
+
+const FUNNEL_CONVERSION_EVENTS = new Set([
+  "palette_export_performed",
+  "pdf_export_completed",
+  "import_conversion_completed",
+  "credit_consumed",
+  "tool_usage_completed",
+]);
+
+function eventIdentity(event) {
+  if (event?.user?.isAuthenticated && event.user.userId) {
+    return `user:${event.user.userId}`;
+  }
+  if (event?.user?.anonymousId) {
+    return `anon:${event.user.anonymousId}`;
+  }
+  if (event?.sessionId) {
+    return `session:${event.sessionId}`;
+  }
+  return null;
+}
+
+function getEventAction(event) {
+  const payload = event?.payload && typeof event.payload === "object"
+    ? event.payload
+    : {};
+  return safeString(
+    payload.action ||
+      payload.messageType ||
+      payload.interactionAction ||
+      payload.type,
+    160
+  );
+}
+
+function isNavigationSignal(event) {
+  const action = String(getEventAction(event) || "").toLowerCase();
+  if (event?.eventType === "ui_tab_changed") return true;
+  if (action.includes("toggle-") || action.includes("tab:")) return true;
+  return Boolean(event?.tool && !isInternalTool(event.tool));
+}
+
+function isMeaningfulActionSignal(event) {
+  if (!event || isPassiveEventType(event.eventType)) return false;
+  if (event.quality?.passive) return false;
+  const action = getEventAction(event);
+  if (action && isPassiveActionKey(action)) return false;
+  return true;
+}
+
+function isConversionSignal(event) {
+  const eventType = String(event?.eventType || "");
+  const action = String(getEventAction(event) || "").toLowerCase();
+  return (
+    FUNNEL_CONVERSION_EVENTS.has(eventType) ||
+    action.includes("export") ||
+    action.includes("save-preset") ||
+    action.includes("favorite") ||
+    action.includes("conversion-completed")
+  );
+}
+
+function isFailureSignal(event) {
+  const eventType = String(event?.eventType || "").toLowerCase();
+  const action = String(getEventAction(event) || "").toLowerCase();
+  const payload = event?.payload && typeof event.payload === "object"
+    ? event.payload
+    : {};
+  return (
+    eventType.includes("failed") ||
+    eventType.includes("blocked") ||
+    action.includes("failed") ||
+    action.includes("blocked") ||
+    action.includes("error") ||
+    payload.reason === "insufficient_credits"
+  );
 }
 
 function sanitizePayload(payload) {
@@ -1548,6 +1650,152 @@ async function fetchRecentEventsData(eventsCollection, match, limit = 120) {
     .sort({ eventAt: -1 })
     .limit(limit)
     .toArray();
+}
+
+async function fetchFunnelData(eventsCollection, match, limit = 100000) {
+  const events = await eventsCollection
+    .find(match)
+    .project({
+      _id: 0,
+      eventAt: 1,
+      eventType: 1,
+      tool: 1,
+      sessionId: 1,
+      user: 1,
+      payload: 1,
+      quality: 1,
+    })
+    .sort({ eventAt: 1 })
+    .limit(limit)
+    .toArray();
+
+  const identities = new Map();
+  const failureCounter = {};
+
+  for (const event of events) {
+    const identity = eventIdentity(event);
+    if (!identity) continue;
+
+    const eventAt = event.eventAt instanceof Date
+      ? event.eventAt
+      : new Date(event.eventAt || Date.now());
+    const state = identities.get(identity) || {
+      identity,
+      firstSeenAt: eventAt,
+      navigatedAt: null,
+      engagedAt: null,
+      convertedAt: null,
+      failedAt: null,
+      lastEventAt: eventAt,
+      lastEventType: null,
+      lastTool: null,
+    };
+
+    if (eventAt < state.firstSeenAt) state.firstSeenAt = eventAt;
+    if (eventAt >= state.lastEventAt) {
+      state.lastEventAt = eventAt;
+      state.lastEventType = event.eventType || null;
+      state.lastTool = event.tool || null;
+    }
+
+    if (!state.navigatedAt && isNavigationSignal(event)) {
+      state.navigatedAt = eventAt;
+    }
+    if (!state.engagedAt && isMeaningfulActionSignal(event)) {
+      state.engagedAt = eventAt;
+    }
+    if (!state.convertedAt && isConversionSignal(event)) {
+      state.convertedAt = eventAt;
+    }
+    if (isFailureSignal(event)) {
+      if (!state.failedAt) state.failedAt = eventAt;
+      const failureKey = event.eventType || getEventAction(event) || "unknown_failure";
+      incrementCounter(failureCounter, failureKey);
+    }
+
+    identities.set(identity, state);
+  }
+
+  const users = Array.from(identities.values());
+  const activeCount = users.length;
+  const navigationCount = users.filter((user) => user.navigatedAt).length;
+  const engagementCount = users.filter((user) => user.engagedAt).length;
+  const conversionCount = users.filter((user) => user.convertedAt).length;
+
+  const rawStages = [
+    {
+      key: "active_users",
+      label: "Active users",
+      description: "Identified user, anonymous user, or session seen in the selected range.",
+      count: activeCount,
+    },
+    {
+      key: "tool_navigation",
+      label: "Opened a workflow",
+      description: "User reached a non-system tool or navigation action.",
+      count: navigationCount,
+    },
+    {
+      key: "meaningful_action",
+      label: "Meaningful action",
+      description: "User performed a non-passive interaction after noise filtering.",
+      count: engagementCount,
+    },
+    {
+      key: "conversion",
+      label: "Value event",
+      description: "User exported, saved, favorited, converted, or consumed credits.",
+      count: conversionCount,
+    },
+  ];
+
+  const stages = rawStages.map((stage, index) => {
+    const previousCount = index === 0 ? null : rawStages[index - 1].count;
+    const dropOff = previousCount === null ? 0 : Math.max(previousCount - stage.count, 0);
+    return {
+      ...stage,
+      previousCount,
+      dropOff,
+      dropOffRate: previousCount > 0 ? dropOff / previousCount : 0,
+      conversionRate: activeCount > 0 ? stage.count / activeCount : 0,
+    };
+  });
+
+  const dropOffStages = stages
+    .slice(1)
+    .filter((stage) => stage.previousCount > 0)
+    .sort((a, b) => b.dropOff - a.dropOff);
+
+  const failureSignals = sortCounter(failureCounter)
+    .slice(0, 8)
+    .map((row) => ({
+      key: row.key,
+      label: humanizeFeatureKey(row.key),
+      count: row.count,
+    }));
+
+  const stalledUsers = users
+    .filter((user) => !user.convertedAt)
+    .sort((a, b) => b.lastEventAt - a.lastEventAt)
+    .slice(0, 12)
+    .map((user) => ({
+      identity: user.identity,
+      lastEventAt: user.lastEventAt,
+      lastEventType: user.lastEventType,
+      lastTool: user.lastTool,
+      stage: user.engagedAt ? "meaningful_action" : user.navigatedAt ? "tool_navigation" : "active_users",
+      failed: Boolean(user.failedAt),
+    }));
+
+  return {
+    totalEventsScanned: events.length,
+    stageCount: stages.length,
+    stages,
+    topDropOff: dropOffStages[0] || null,
+    dropOffStages,
+    failureSignals,
+    stalledUsers,
+  };
 }
 
 async function fetchEventTypeBreakdown(eventsCollection, match, limit = MAX_EVENT_TYPE_BREAKDOWN) {
@@ -3448,20 +3696,16 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
       user: normalizeUser(body.user, safeString(body.deviceId, 120) || safeString(body.sessionId, 120)),
     };
 
-    const ignoredEventTypes = new Set([
-      "session_heartbeat",
-      "plugin_message",
-      "analytics_transport_updated",
-      "tool_context_changed",
-      "backend_operation"
-    ]);
+    const qualityCounts = {
+      passive_event_type: 0,
+      passive_action: 0,
+      analytics_transport: 0,
+    };
+    let dropped = 0;
+    let storedPassive = 0;
+    const docs = [];
 
-    const cleanEvents = inputEvents.filter(event => {
-      const type = safeString(event && (event.eventType || event.type), 120);
-      return !ignoredEventTypes.has(type);
-    });
-
-    const docs = cleanEvents.slice(0, 1000).map((event) => {
+    for (const event of inputEvents.slice(0, 1000)) {
       const eventType = safeString(event && (event.eventType || event.type), 120) || "unknown_event";
       const eventAt = toDate(event && (event.eventAt || event.timestamp), envelope.sentAt || now);
       const eventDeviceId =
@@ -3469,6 +3713,19 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
       const eventSessionId =
         safeString(event && event.sessionId, 120) || envelope.sessionId || "unknown-session";
       const payload = sanitizePayload(event && event.payload);
+      const quality = evaluateEventQuality(eventType, payload);
+
+      if (quality.reason && qualityCounts[quality.reason] !== undefined) {
+        qualityCounts[quality.reason] += 1;
+      }
+      if (quality.drop) {
+        dropped += 1;
+        continue;
+      }
+      if (quality.passive) {
+        storedPassive += 1;
+      }
+
       const user = normalizeUser(
         (event && event.user) || envelope.user,
         eventDeviceId || eventSessionId
@@ -3479,7 +3736,7 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
         null;
       const tool = inferToolForEvent(eventType, payload, rawTool);
 
-      return {
+      docs.push({
         sessionId: eventSessionId,
         deviceId: eventDeviceId,
         eventType,
@@ -3491,17 +3748,29 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
         user,
         runtime: envelope.runtime,
         plugin: envelope.plugin,
-      };
-    });
+        quality: {
+          passive: quality.passive,
+          reason: quality.reason,
+        },
+      });
+    }
 
-    const eventsCollection = await getEventsCollection();
-    const insertResult = await eventsCollection.insertMany(docs, {
-      ordered: false,
-    });
+    let inserted = 0;
+    if (docs.length) {
+      const eventsCollection = await getEventsCollection();
+      const insertResult = await eventsCollection.insertMany(docs, {
+        ordered: false,
+      });
+      inserted = Object.keys(insertResult.insertedIds).length;
+    }
 
     return res.status(202).json({
-      accepted: docs.length,
-      inserted: Object.keys(insertResult.insertedIds).length,
+      accepted: inputEvents.length,
+      stored: docs.length,
+      inserted,
+      dropped,
+      storedPassive,
+      dropReasons: qualityCounts,
     });
   } catch (error) {
     console.error("Ingest error:", error);
@@ -3587,6 +3856,19 @@ app.get("/api/plugin-analytics/recent-events", async (req, res) => {
   }
 });
 
+app.get("/api/plugin-analytics/funnel", async (req, res) => {
+  try {
+    const eventsCollection = await getEventsCollection();
+    const { match, from, to } = buildMatch(req.query);
+    const limit = parseLimit(req.query.limit, 100000, 250000);
+    const funnel = await fetchFunnelData(eventsCollection, match, limit);
+    return res.json({ from, to, ...funnel });
+  } catch (error) {
+    console.error("Funnel query failed:", error);
+    return res.status(500).json({ error: "Failed to load funnel" });
+  }
+});
+
 app.get("/api/plugin-analytics/features", async (req, res) => {
   try {
     const eventsCollection = await getEventsCollection();
@@ -3620,7 +3902,7 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
     const sessionsLimit = parseLimit(req.query.sessionsLimit, 60, 300);
     const recentEventsLimit = parseLimit(req.query.eventsLimit, 100, 1000);
 
-    const [summary, tools, heatmap, sessions, events, eventTypeBreakdown, actionCatalog, creditIntelligence, publicStats] = await Promise.all([
+    const [summary, tools, heatmap, sessions, events, eventTypeBreakdown, actionCatalog, funnel, creditIntelligence, publicStats] = await Promise.all([
       fetchSummaryData(eventsCollection, match),
       fetchToolUsageData(eventsCollection, match),
       fetchHeatmapData(eventsCollection, match, {
@@ -3634,6 +3916,7 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
       fetchRecentEventsData(eventsCollection, match, recentEventsLimit),
       fetchEventTypeBreakdown(eventsCollection, match),
       fetchActionCatalog(eventsCollection, baseMatch),
+      fetchFunnelData(eventsCollection, match),
       fetchCreditIntelligence(eventsCollection),
       computePublicStatsMetrics(eventsCollection, engagementCollection),
     ]);
@@ -3645,6 +3928,7 @@ app.get("/api/plugin-analytics/dashboard", async (req, res) => {
       actionCatalog: { actions: actionCatalog },
       toolUsage: { tools },
       eventTypeBreakdown,
+      funnel,
       heatmap,
       sessions: { sessions },
       recentEvents: { events },
