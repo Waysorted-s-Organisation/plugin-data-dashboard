@@ -86,16 +86,22 @@ test("Dashboard APIs", async (t) => {
   });
 
   await t.test("GET /api/plugin-analytics/stats", async () => {
-    const res = await request(app).get("/api/plugin-analytics/stats");
+    const res = await request(app)
+      .get("/api/plugin-analytics/stats")
+      .set("Authorization", authString);
     assert.strictEqual(res.status, 200);
     assert.strictEqual(res.body.likes, 0);
   });
 
   await t.test("POST /api/plugin-analytics/stats/like", async () => {
-    const res = await request(app).post("/api/plugin-analytics/stats/like");
+    const res = await request(app)
+      .post("/api/plugin-analytics/stats/like")
+      .set("Authorization", authString);
     assert.strictEqual(res.status, 200);
     
-    const getRes = await request(app).get("/api/plugin-analytics/stats");
+    const getRes = await request(app)
+      .get("/api/plugin-analytics/stats")
+      .set("Authorization", authString);
     assert.strictEqual(getRes.body.likes, 1);
   });
 

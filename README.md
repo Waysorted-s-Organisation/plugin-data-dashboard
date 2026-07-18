@@ -31,6 +31,12 @@ Optional read-access lock for dashboard pages/APIs:
 - `DASHBOARD_BASIC_AUTH_USER`
 - `DASHBOARD_BASIC_AUTH_PASS`
 
+Unified Newsletter admin integration:
+- `NEWSLETTER_API_URL`
+- `NEWSLETTER_MANAGEMENT_TOKEN` (must match Newsletter's
+  `MANAGEMENT_API_TOKEN`; never expose it in browser code)
+- `NEWSLETTER_PROXY_TIMEOUT_MS` (optional, defaults to 15000)
+
 ## 2) Run
 
 ```bash

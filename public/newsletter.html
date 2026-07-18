@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Newsletter Operations | Waysorted Admin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="page-header newsletter-page-header">
+      <div>
+        <p class="eyebrow">Waysorted Admin</p>
+        <h1>Newsletter Operations</h1>
+        <p class="subtitle">
+          Journeys, broadcasts, audiences, templates, and delivery performance in one place.
+        </p>
+      </div>
+      <div class="header-actions">
+        <nav class="top-nav" aria-label="Primary navigation">
+          <a class="nav-link" href="/">Overview</a>
+          <a class="nav-link" href="/features.html">Feature Intelligence</a>
+          <a class="nav-link" href="/heatmap.html">Heatmap Lab</a>
+          <a class="nav-link" href="/credits.html">Credit Consumption</a>
+          <a class="nav-link active" href="/newsletter.html">Newsletter</a>
+          <a class="nav-link" href="/stats.html">Public Stats</a>
+        </nav>
+        <button id="refreshNewsletter" class="primary-btn" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main class="newsletter-shell">
+      <nav class="newsletter-tabs" aria-label="Newsletter navigation">
+        <button class="newsletter-tab active" data-view="overview" type="button">Overview</button>
+        <button class="newsletter-tab" data-view="campaigns" type="button">Campaigns</button>
+        <button class="newsletter-tab" data-view="subscribers" type="button">Subscribers</button>
+        <button class="newsletter-tab" data-view="templates" type="button">Templates</button>
+        <button class="newsletter-tab" data-view="analytics" type="button">Email Analytics</button>
+      </nav>
+
+      <div id="newsletterNotice" class="newsletter-notice" hidden></div>
+
+      <section id="view-overview" class="newsletter-view">
+        <div class="section-heading-row">
+          <div>
+            <p class="eyebrow">System snapshot</p>
+            <h2>Newsletter Overview</h2>
+          </div>
+          <span id="integrationStatus" class="status-pill neutral">Checking integration</span>
+        </div>
+
+        <section id="newsletterKpis" class="kpi-grid newsletter-kpis" aria-live="polite"></section>
+
+        <section class="card-grid two-up newsletter-two-up">
+          <article class="card journey-card" id="journeyN1"></article>
+          <article class="card journey-card" id="journeyN2"></article>
+        </section>
+
+        <section class="card-grid two-up newsletter-two-up">
+          <article class="card" id="dispatcherCard"></article>
+          <article class="card newsletter-actions-card">
+            <div class="card-title-row">
+              <h2>Quick Actions</h2>
+            </div>
+            <div class="newsletter-action-grid">
+              <button type="button" class="secondary-btn" data-open-view="campaigns">Create campaign</button>
+              <button type="button" class="secondary-btn" data-open-view="templates">Create template</button>
+              <button type="button" class="secondary-btn" data-open-view="subscribers">Manage audience</button>
+              <button type="button" class="secondary-btn" data-open-view="analytics">Review performance</button>
+            </div>
+          </article>
+        </section>
+
+        <section class="card">
+          <div class="card-title-row">
+            <h2>Recent Campaigns</h2>
+            <button type="button" class="text-btn" data-open-view="campaigns">View all</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Campaign</th>
+                  <th>Status</th>
+                  <th>Audience</th>
+                  <th>Sent</th>
+                  <th>Scheduled</th>
+                </tr>
+              </thead>
+              <tbody id="recentCampaignsBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="view-campaigns" class="newsletter-view" hidden>
+        <div class="section-heading-row">
+          <div>
+            <p class="eyebrow">Broadcasts</p>
+            <h2>Campaigns</h2>
+          </div>
+          <button id="openCampaignDialog" class="primary-btn" type="button">New campaign</button>
+        </div>
+        <div class="newsletter-toolbar">
+          <label>
+            Status
+            <select id="campaignStatusFilter">
+              <option value="all">All statuses</option>
+              <option value="draft">Draft</option>
+              <option value="scheduled">Scheduled</option>
+              <option value="queued">Queued</option>
+              <option value="sending">Sending</option>
+              <option value="sent">Sent</option>
+              <option value="paused">Paused</option>
+              <option value="failed">Failed</option>
+            </select>
+          </label>
+          <label class="toolbar-search">
+            Search
+            <input id="campaignSearch" type="search" placeholder="Name or subject" />
+          </label>
+          <button id="applyCampaignFilters" class="secondary-btn" type="button">Apply</button>
+        </div>
+        <section class="card">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Subject</th>
+                  <th>Status</th>
+                  <th>Recipients</th>
+                  <th>Sent</th>
+                  <th>Schedule</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="campaignsBody"></tbody>
+            </table>
+          </div>
+          <p id="campaignsEmpty" class="empty-copy" hidden>No campaigns match these filters.</p>
+        </section>
+      </section>
+
+      <section id="view-subscribers" class="newsletter-view" hidden>
+        <div class="section-heading-row">
+          <div>
+            <p class="eyebrow">Audience</p>
+            <h2>Subscribers</h2>
+          </div>
+          <div class="button-row">
+            <button id="openImportDialog" class="secondary-btn" type="button">Import CSV</button>
+            <button id="openSubscriberDialog" class="primary-btn" type="button">Add subscriber</button>
+          </div>
+        </div>
+        <div id="subscriberKpis" class="kpi-grid newsletter-kpis compact-kpis"></div>
+        <div class="newsletter-toolbar">
+          <label>
+            Status
+            <select id="subscriberStatusFilter">
+              <option value="all">All subscribers</option>
+              <option value="active">Active</option>
+              <option value="unsubscribed">Unsubscribed</option>
+              <option value="bounced">Bounced</option>
+            </select>
+          </label>
+          <label class="toolbar-search">
+            Search
+            <input id="subscriberSearch" type="search" placeholder="Email or name" />
+          </label>
+          <button id="applySubscriberFilters" class="secondary-btn" type="button">Apply</button>
+        </div>
+        <section class="card">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Email</th>
+                  <th>Name</th>
+                  <th>Status</th>
+                  <th>Tags</th>
+                  <th>Added</th>
+                </tr>
+              </thead>
+              <tbody id="subscribersBody"></tbody>
+            </table>
+          </div>
+          <p id="subscribersEmpty" class="empty-copy" hidden>No subscribers match these filters.</p>
+        </section>
+      </section>
+
+      <section id="view-templates" class="newsletter-view" hidden>
+        <div class="section-heading-row">
+          <div>
+            <p class="eyebrow">Content</p>
+            <h2>Email Templates</h2>
+          </div>
+          <button id="openTemplateDialog" class="primary-btn" type="button">New template</button>
+        </div>
+        <section class="card">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Version</th>
+                  <th>Variables</th>
+                  <th>Updated</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="templatesBody"></tbody>
+            </table>
+          </div>
+          <p id="templatesEmpty" class="empty-copy" hidden>No active templates are available.</p>
+        </section>
+      </section>
+
+      <section id="view-analytics" class="newsletter-view" hidden>
+        <div class="section-heading-row">
+          <div>
+            <p class="eyebrow">Delivery intelligence</p>
+            <h2>Email Analytics</h2>
+          </div>
+          <label class="inline-filter">
+            Range
+            <select id="analyticsDays">
+              <option value="7">Last 7 days</option>
+              <option value="30" selected>Last 30 days</option>
+              <option value="90">Last 90 days</option>
+              <option value="365">Last year</option>
+            </select>
+          </label>
+        </div>
+        <div id="analyticsKpis" class="kpi-grid newsletter-kpis"></div>
+        <section class="card-grid two-up newsletter-two-up">
+          <article class="card" id="broadcastAnalytics"></article>
+          <article class="card" id="journeyAnalytics"></article>
+        </section>
+        <section class="card">
+          <h2>Top Campaigns</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Campaign</th>
+                  <th>Sent</th>
+                  <th>Unique opens</th>
+                  <th>Open rate</th>
+                  <th>Unique clicks</th>
+                  <th>CTR</th>
+                </tr>
+              </thead>
+              <tbody id="topCampaignsBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <dialog id="campaignDialog" class="newsletter-dialog wide-dialog">
+      <form id="campaignForm" method="dialog">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">Broadcast builder</p>
+            <h2>Create campaign</h2>
+          </div>
+          <button class="icon-btn" type="button" data-close-dialog="campaignDialog" aria-label="Close">×</button>
+        </div>
+        <div class="form-grid two-column-form">
+          <label>
+            Internal campaign name
+            <input id="campaignName" type="text" required placeholder="July product update" />
+          </label>
+          <label>
+            Email subject
+            <input id="campaignSubject" type="text" required placeholder="New Waysorted updates" />
+          </label>
+          <label>
+            Template
+            <select id="campaignTemplate" required></select>
+          </label>
+          <label>
+            Delivery mode
+            <select id="campaignMode">
+              <option value="draft">Save as draft</option>
+              <option value="scheduled">Schedule</option>
+              <option value="immediate">Send now</option>
+            </select>
+          </label>
+          <label id="campaignScheduleField" hidden>
+            Schedule in your local timezone
+            <input id="campaignSchedule" type="datetime-local" />
+            <small id="browserTimezone"></small>
+          </label>
+          <label>
+            Audience
+            <select id="campaignAudience">
+              <option value="all_active">All active subscribers</option>
+              <option value="custom">Custom email list</option>
+            </select>
+          </label>
+        </div>
+        <label id="customAudienceField" hidden>
+          Custom recipients
+          <textarea id="campaignRecipients" rows="5" placeholder="one@example.com&#10;two@example.com"></textarea>
+        </label>
+        <label>
+          Personalization variables (JSON)
+          <textarea id="campaignPersonalization" rows="5" placeholder='{"cta_url":"https://www.waysorted.com"}'></textarea>
+        </label>
+        <div id="campaignPreview" class="newsletter-preview" hidden>
+          <div class="preview-subject" id="campaignPreviewSubject"></div>
+          <iframe id="campaignPreviewFrame" title="Campaign email preview" sandbox></iframe>
+        </div>
+        <div class="dialog-actions">
+          <button id="previewCampaign" class="secondary-btn" type="button">Preview</button>
+          <span class="dialog-spacer"></span>
+          <button class="secondary-btn" type="button" data-close-dialog="campaignDialog">Cancel</button>
+          <button id="saveCampaign" class="primary-btn" type="submit">Save campaign</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="campaignDetailDialog" class="newsletter-dialog wide-dialog">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">Campaign</p>
+          <h2 id="campaignDetailTitle">Campaign details</h2>
+        </div>
+        <button class="icon-btn" type="button" data-close-dialog="campaignDetailDialog" aria-label="Close">×</button>
+      </div>
+      <div id="campaignDetailContent"></div>
+      <div id="campaignDetailActions" class="dialog-actions"></div>
+    </dialog>
+
+    <dialog id="subscriberDialog" class="newsletter-dialog">
+      <form id="subscriberForm" method="dialog">
+        <div class="dialog-heading">
+          <div><p class="eyebrow">Audience</p><h2>Add subscriber</h2></div>
+          <button class="icon-btn" type="button" data-close-dialog="subscriberDialog" aria-label="Close">×</button>
+        </div>
+        <label>Email<input id="subscriberEmail" type="email" required /></label>
+        <label>Name<input id="subscriberName" type="text" /></label>
+        <label>Tags<input id="subscriberTags" type="text" placeholder="customer, vip" /></label>
+        <div class="dialog-actions">
+          <span class="dialog-spacer"></span>
+          <button class="secondary-btn" type="button" data-close-dialog="subscriberDialog">Cancel</button>
+          <button class="primary-btn" type="submit">Add subscriber</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="importDialog" class="newsletter-dialog">
+      <form id="importForm" method="dialog">
+        <div class="dialog-heading">
+          <div><p class="eyebrow">Audience</p><h2>Import subscribers</h2></div>
+          <button class="icon-btn" type="button" data-close-dialog="importDialog" aria-label="Close">×</button>
+        </div>
+        <p class="muted">CSV headers: <code>email,name,tags</code>. Existing suppressed users are not reactivated.</p>
+        <label>CSV file<input id="subscriberCsv" type="file" accept=".csv,text/csv" required /></label>
+        <div class="dialog-actions">
+          <span class="dialog-spacer"></span>
+          <button class="secondary-btn" type="button" data-close-dialog="importDialog">Cancel</button>
+          <button class="primary-btn" type="submit">Import safely</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="templateDialog" class="newsletter-dialog wide-dialog">
+      <form id="templateForm" method="dialog">
+        <div class="dialog-heading">
+          <div><p class="eyebrow">Content</p><h2>Create template</h2></div>
+          <button class="icon-btn" type="button" data-close-dialog="templateDialog" aria-label="Close">×</button>
+        </div>
+        <div class="form-grid two-column-form">
+          <label>Name<input id="templateName" type="text" required /></label>
+          <label>Description<input id="templateDescription" type="text" /></label>
+          <label>Load HTML file<input id="templateHtmlFile" type="file" accept=".html,.htm,text/html" /></label>
+          <label>Load CSS file<input id="templateCssFile" type="file" accept=".css,text/css" /></label>
+        </div>
+        <label>HTML content<textarea id="templateHtml" rows="14" required placeholder="<html>...</html>"></textarea></label>
+        <label>CSS content<textarea id="templateCss" rows="7" placeholder="body { ... }"></textarea></label>
+        <div class="dialog-actions">
+          <span class="dialog-spacer"></span>
+          <button class="secondary-btn" type="button" data-close-dialog="templateDialog">Cancel</button>
+          <button class="primary-btn" type="submit">Create template</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="templatePreviewDialog" class="newsletter-dialog wide-dialog">
+      <div class="dialog-heading">
+        <div><p class="eyebrow">Template</p><h2 id="templatePreviewTitle">Preview</h2></div>
+        <button class="icon-btn" type="button" data-close-dialog="templatePreviewDialog" aria-label="Close">×</button>
+      </div>
+      <iframe id="templatePreviewFrame" class="template-preview-frame" title="Template preview" sandbox></iframe>
+    </dialog>
+
+    <div id="newsletterToast" class="newsletter-toast" role="status" hidden></div>
+    <script type="module" src="/newsletter.js"></script>
+  </body>
+</html>

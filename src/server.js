@@ -22,8 +22,6 @@ const INGEST_TOKEN_REQUIRED =
   String(process.env.ANALYTICS_INGEST_TOKEN_REQUIRED || "")
     .trim()
     .toLowerCase() === "true";
-const READ_USER = (process.env.DASHBOARD_BASIC_AUTH_USER || "").trim();
-const READ_PASS = (process.env.DASHBOARD_BASIC_AUTH_PASS || "").trim();
 let initializationPromise = null;
 let isInitialized = false;
 const PASSIVE_EVENT_TYPES = [
@@ -96,6 +94,19 @@ const PASSIVE_ACTION_KEYS = [
 const PASSIVE_EVENT_TYPE_SET = new Set(PASSIVE_EVENT_TYPES);
 const PASSIVE_ACTION_KEY_SET = new Set(PASSIVE_ACTION_KEYS);
 const MAX_EVENT_TYPE_BREAKDOWN = 40;
+
+function newsletterConfig() {
+  return {
+    apiUrl: String(process.env.NEWSLETTER_API_URL || "")
+      .trim()
+      .replace(/\/+$/, ""),
+    token: String(process.env.NEWSLETTER_MANAGEMENT_TOKEN || "").trim(),
+    timeoutMs: Math.max(
+      1000,
+      Number(process.env.NEWSLETTER_PROXY_TIMEOUT_MS || 15000)
+    ),
+  };
+}
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
@@ -884,7 +895,9 @@ function buildHeatmapBins(points, gridX, gridY) {
 }
 
 function readAuthGate(req, res, next) {
-  if (!READ_USER || !READ_PASS) {
+  const readUser = (process.env.DASHBOARD_BASIC_AUTH_USER || "").trim();
+  const readPass = (process.env.DASHBOARD_BASIC_AUTH_PASS || "").trim();
+  if (!readUser || !readPass) {
     return next();
   }
 
@@ -899,7 +912,7 @@ function readAuthGate(req, res, next) {
   const user = sepIndex >= 0 ? decoded.slice(0, sepIndex) : "";
   const pass = sepIndex >= 0 ? decoded.slice(sepIndex + 1) : "";
 
-  if (user !== READ_USER || pass !== READ_PASS) {
+  if (user !== readUser || pass !== readPass) {
     return res.status(403).json({ error: "Invalid credentials" });
   }
 
@@ -1010,10 +1023,14 @@ async function recordDailySnapshot() {
 }
 
 app.get("/health", (_req, res) => {
+  const newsletter = newsletterConfig();
   res.json({
     ok: true,
     service: "plugin-data-dashboard",
     initialized: isInitialized,
+    newsletterIntegrationConfigured: Boolean(
+      newsletter.apiUrl && newsletter.token
+    ),
   });
 });
 
@@ -2029,7 +2046,107 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
   }
 });
 
+const NEWSLETTER_PROXY_PATHS = [
+  /^\/overview$/,
+  /^\/analytics$/,
+  /^\/campaigns$/,
+  /^\/campaigns\/preview$/,
+  /^\/campaigns\/\d+$/,
+  /^\/campaigns\/\d+\/actions$/,
+  /^\/subscribers$/,
+  /^\/subscribers\/import$/,
+  /^\/templates$/,
+  /^\/templates\/\d+$/,
+  /^\/templates\/\d+\/preview$/,
+];
+
+function isAllowedNewsletterProxyPath(pathname) {
+  return NEWSLETTER_PROXY_PATHS.some((pattern) => pattern.test(pathname));
+}
+
+function newsletterMutationHasTrustedOrigin(req) {
+  if (!["POST", "DELETE"].includes(req.method)) return true;
+  const origin = safeString(req.headers.origin, 500);
+  if (!origin) return true;
+
+  const forwardedProtocol = safeString(req.headers["x-forwarded-proto"], 40);
+  const forwardedHost = safeString(req.headers["x-forwarded-host"], 300);
+  const protocol = (forwardedProtocol || req.protocol || "https")
+    .split(",")[0]
+    .trim();
+  const host = (forwardedHost || req.headers.host || "")
+    .split(",")[0]
+    .trim();
+  return Boolean(host) && origin === `${protocol}://${host}`;
+}
+
+async function newsletterProxy(req, res) {
+  const newsletter = newsletterConfig();
+  if (!newsletter.apiUrl || !newsletter.token) {
+    return res.status(503).json({
+      error: "Newsletter integration is not configured",
+    });
+  }
+  if (!isAllowedNewsletterProxyPath(req.path)) {
+    return res.status(404).json({ error: "Unsupported newsletter endpoint" });
+  }
+  if (!["GET", "POST", "DELETE"].includes(req.method)) {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+  if (!newsletterMutationHasTrustedOrigin(req)) {
+    return res.status(403).json({ error: "Cross-origin mutation blocked" });
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(),
+    newsletter.timeoutMs
+  );
+  const target = new URL(
+    `/api/management${req.path}`,
+    `${newsletter.apiUrl}/`
+  );
+  for (const [key, value] of Object.entries(req.query || {})) {
+    if (Array.isArray(value)) {
+      value.forEach((item) => target.searchParams.append(key, String(item)));
+    } else if (value !== undefined && value !== null) {
+      target.searchParams.set(key, String(value));
+    }
+  }
+
+  try {
+    const hasBody = ["POST", "DELETE"].includes(req.method) &&
+      req.body && Object.keys(req.body).length > 0;
+    const upstream = await fetch(target, {
+      method: req.method,
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${newsletter.token}`,
+        ...(hasBody ? { "Content-Type": "application/json" } : {}),
+      },
+      body: hasBody ? JSON.stringify(req.body) : undefined,
+      signal: controller.signal,
+    });
+    const body = await upstream.text();
+    const contentType = upstream.headers.get("content-type");
+    res.setHeader("Cache-Control", "no-store");
+    if (contentType) res.setHeader("Content-Type", contentType);
+    return res.status(upstream.status).send(body);
+  } catch (error) {
+    const timeout = error && error.name === "AbortError";
+    console.error("Newsletter proxy failed:", error);
+    return res.status(timeout ? 504 : 502).json({
+      error: timeout
+        ? "Newsletter service timed out"
+        : "Newsletter service is unavailable",
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 app.use(readAuthGate);
+app.use("/api/newsletter", newsletterProxy);
 app.use(express.static(publicDir));
 
 app.get("/api/plugin-analytics/summary", async (req, res) => {
