@@ -1,133 +1,77 @@
-# Plugin Data Dashboard
+# Waysorted Operations Dashboard
 
-Internal analytics dashboard for the Waysorted Figma plugin.
+Owner-only operations console for three production data areas:
 
-It ingests event batches from the plugin, stores them in MongoDB, and provides KPI + behavior analysis:
-- Authenticated vs anonymous usage
-- Tool usage and time spent per tool
-- Click heatmap for the plugin UI
-- Session tracking and recent events
+- **Credits** — billing wallets and completed credit-consuming tool activity.
+- **Newsletter** — N1/N2 automations, audience, templates, campaigns and delivery analytics.
+- **Recent Activity** — successful authentication sessions with the latest credited tool activity.
 
-## 1) Setup
+The dashboard intentionally does not present the retired Product Overview, Feature Intelligence, Heatmap or manually incremented public counters. Historical plugin telemetry remains stored for a future ingest repair, but is not treated as current operational data.
+
+## Setup
 
 ```bash
 npm install
 cp .env.example .env
-```
-
-Set required env values in `.env`:
-- `MONGODB_URI` (recommended)
-- OR one of these supported URI names:
-  - `NEXT_PUBLIC_MONGODB_URI_TOOLS`
-  - `NEXT_PUBLIC_MONGODB_URI`
-  - `MONGO_URI`
-  - `MONGO_URL`
-- `MONGODB_DB` (optional, defaults to `plugin_data_dashboard`)
-- `PORT` (optional, defaults to `4080`)
-- `ANALYTICS_INGEST_TOKEN` (optional but recommended)
-- `ANALYTICS_INGEST_TOKEN_REQUIRED` (`false` by default; set `true` to enforce token)
-
-Optional read-access lock for dashboard pages/APIs:
-- `DASHBOARD_BASIC_AUTH_USER`
-- `DASHBOARD_BASIC_AUTH_PASS`
-
-Unified Newsletter admin integration:
-- `NEWSLETTER_API_URL`
-- `NEWSLETTER_MANAGEMENT_TOKEN` (must match Newsletter's
-  `MANAGEMENT_API_TOKEN`; never expose it in browser code)
-- `NEWSLETTER_PROXY_TIMEOUT_MS` (optional, defaults to 15000)
-
-## 2) Run
-
-```bash
 npm run dev
 ```
 
-Open: `http://localhost:4080`
+Open `http://localhost:4080`. The root URL serves Credits.
 
-## Vercel Deployment
+### Required production settings
 
-This repo is Vercel-serverless ready via:
-- `api/index.js` (serverless handler)
-- `vercel.json` (routes all requests through the handler)
+- `BACKEND_MONGODB_URI` — server-only MongoDB URI for Waysorted. Use a read-only database user.
+- `BACKEND_MONGODB_DB=waysorted`
+- `DASHBOARD_BASIC_AUTH_USER`
+- `DASHBOARD_BASIC_AUTH_PASS`
+- `NEWSLETTER_API_URL`
+- `NEWSLETTER_MANAGEMENT_TOKEN`
 
-Set these env vars in Vercel Project Settings:
-- `MONGODB_URI` (or one of the fallback URI names listed above)
-- `MONGODB_DB` (optional)
-- `ANALYTICS_INGEST_TOKEN` (recommended)
-- Optional auth gate:
-  - `DASHBOARD_BASIC_AUTH_USER`
-  - `DASHBOARD_BASIC_AUTH_PASS`
+Optional:
 
-If you use your existing env naming from `wayweb-dev`, `NEXT_PUBLIC_MONGODB_URI_TOOLS` works directly.
+- `CREDIT_LOW_THRESHOLD=20`
+- `NEWSLETTER_PROXY_TIMEOUT_MS=15000`
+- Backend collection-name overrides listed in `.env.example`.
 
-## 3) Plugin Ingest Endpoint
+`BACKEND_MONGODB_URI` never falls back to the analytics URI. Missing configuration returns an explicit `503`; the UI does not substitute zeroes.
 
-Ingest route:
+### Archived plugin ingest
+
+The compatibility ingest endpoint remains available:
 
 ```text
 POST /api/plugin-analytics/ingest
 ```
 
-Body format expected from plugin runtime:
+It uses the separate analytics settings:
 
-```json
-{
-  "source": "figma-plugin-main",
-  "sessionId": "session_x",
-  "deviceId": "device_x",
-  "sentAt": "2026-02-19T00:00:00.000Z",
-  "runtime": { "editorType": "figma" },
-  "plugin": { "name": "waysorted-plugin", "version": "1.0.1" },
-  "events": [
-    {
-      "eventType": "ui_click",
-      "eventAt": "2026-02-19T00:00:00.000Z",
-      "source": "ui",
-      "tool": "palettable",
-      "payload": { "x": 200, "y": 80 }
-    }
-  ]
-}
+- `MONGODB_URI`
+- `MONGODB_DB=plugin_data_dashboard`
+- `ANALYTICS_INGEST_TOKEN`
+- `ANALYTICS_INGEST_TOKEN_REQUIRED`
+
+## Operations APIs
+
+All operations APIs are protected by dashboard Basic Auth and return `Cache-Control: no-store`.
+
+- `GET /api/operations/credits/overview?days=30`
+- `GET /api/operations/credits/users?page=1&pageSize=25`
+- `GET /api/operations/credits/users/:userId?days=30`
+- `GET /api/operations/activity/recent-users?days=7&page=1&pageSize=25`
+- `GET /api/operations/health`
+- `GET /api/newsletter/customers/:subscriberId`
+- `/api/newsletter/*` — allowlisted server-side proxy to Newsletter management APIs.
+
+Credit consumption counts committed reservation lifecycles, excludes released and pending holds, and subtracts compensation credits. Tool attribution uses `toolCode`, then `featureCode`, then the explicit `Unattributed` label.
+
+## Verification
+
+```bash
+npm test
 ```
 
-If `ANALYTICS_INGEST_TOKEN` is set, pass it in header:
+The isolated test suite covers authentication, wallet joins, email search, pagination, low-credit boundaries, reservation lifecycle accounting, activity grouping, Newsletter billing joins, sanitized health responses, and removal of retired pages/APIs.
 
-```text
-x-plugin-ingest-token: <token>
-```
+## Vercel
 
-By default, ingest token enforcement is relaxed for easier plugin auto-ingest.
-If you need strict enforcement, set:
-
-```text
-ANALYTICS_INGEST_TOKEN_REQUIRED=true
-```
-
-## 4) API Endpoints
-
-- `GET /api/plugin-analytics/summary`
-- `GET /api/plugin-analytics/tool-usage`
-- `GET /api/plugin-analytics/heatmap`
-- `GET /api/plugin-analytics/sessions`
-- `GET /api/plugin-analytics/recent-events`
-- `GET /api/plugin-analytics/dashboard` (single optimized payload for UI)
-
-Common query params:
-- `from=<ISO date>`
-- `to=<ISO date>`
-- `tool=<tool id | all>`
-- `auth=<authenticated | anonymous | all>`
-
-Additional dashboard endpoint query params:
-- `heatmapCompact=1` (default true)
-- `heatmapLimit=<n>`
-- `heatmapGridX=<n>`
-- `heatmapGridY=<n>`
-- `sessionsLimit=<n>`
-- `eventsLimit=<n>`
-
-## Notes
-
-- This dashboard is internal-only by design.
-- The Figma plugin side can send both authenticated and anonymous events; user identity fields are optional in each event.
+`api/index.js` exports the Express application and `vercel.json` routes requests to it. Configure all required settings for Preview and Production. Never use `NEXT_PUBLIC_*` variables for backend credentials or Newsletter tokens.

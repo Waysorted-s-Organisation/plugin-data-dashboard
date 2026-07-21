@@ -2,6 +2,8 @@ import { MongoClient } from "mongodb";
 
 let cachedClient = null;
 let cachedDb = null;
+let cachedBackendClient = null;
+let cachedBackendDb = null;
 
 function getMongoUri() {
   const candidates = [
@@ -67,12 +69,67 @@ export async function getDb() {
   return cachedDb;
 }
 
+function getBackendMongoUri() {
+  const uri = String(process.env.BACKEND_MONGODB_URI || "").trim();
+  if (!uri) {
+    const error = new Error("BACKEND_MONGODB_URI is not configured");
+    error.code = "BACKEND_DATABASE_NOT_CONFIGURED";
+    throw error;
+  }
+  return uri;
+}
+
+export async function getBackendDb() {
+  if (cachedBackendDb) return cachedBackendDb;
+
+  const uri = getBackendMongoUri();
+  const dbName = String(process.env.BACKEND_MONGODB_DB || "waysorted").trim();
+  if (!cachedBackendClient) {
+    cachedBackendClient = new MongoClient(uri, {
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 10000,
+    });
+    await cachedBackendClient.connect();
+  }
+  cachedBackendDb = cachedBackendClient.db(dbName);
+  return cachedBackendDb;
+}
+
+export async function getBackendUsersCollection() {
+  return (await getBackendDb()).collection(
+    String(process.env.BACKEND_USERS_COLLECTION || "users").trim()
+  );
+}
+
+export async function getBackendUserBillingCollection() {
+  return (await getBackendDb()).collection(
+    String(process.env.BACKEND_USER_BILLING_COLLECTION || "userbillings").trim()
+  );
+}
+
+export async function getBackendCreditLedgerCollection() {
+  return (await getBackendDb()).collection(
+    String(process.env.BACKEND_CREDIT_LEDGER_COLLECTION || "creditledgers").trim()
+  );
+}
+
+export async function getBackendSessionsCollection() {
+  return (await getBackendDb()).collection(
+    String(process.env.BACKEND_SESSIONS_COLLECTION || "sessions").trim()
+  );
+}
+
 export async function closeDb() {
   if (cachedClient) {
     await cachedClient.close();
   }
   cachedClient = null;
   cachedDb = null;
+  if (cachedBackendClient) {
+    await cachedBackendClient.close();
+  }
+  cachedBackendClient = null;
+  cachedBackendDb = null;
 }
 
 export async function getEventsCollection() {
@@ -92,7 +149,6 @@ export async function getSnapshotsCollection() {
 
 export async function ensureIndexes() {
   const events = await getEventsCollection();
-  const snapshots = await getSnapshotsCollection();
 
   await Promise.all([
     events.createIndex({ eventAt: -1 }),
@@ -106,7 +162,5 @@ export async function ensureIndexes() {
     events.createIndex({ "user.userId": 1, eventAt: -1 }),
     events.createIndex({ "user.anonymousId": 1, eventAt: -1 }),
     events.createIndex({ source: 1, eventAt: -1 }),
-    snapshots.createIndex({ date: -1 }),
-    snapshots.createIndex({ date: 1 }, { unique: true }),
   ]);
 }
