@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Newsletter Operations | Waysorted</title>
+    <link rel="stylesheet" href="/newsletter-v2.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">Skip to content</a>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand"><span class="brand-mark">W</span><span>Waysorted</span></div>
+        <nav aria-label="Product navigation">
+          <a href="/"><span>⌂</span>Product Overview</a>
+          <a href="/features.html"><span>◇</span>Feature Intelligence</a>
+          <a href="/heatmap.html"><span>⌗</span>Heatmap</a>
+          <a href="/credits.html"><span>◎</span>Credits</a>
+          <a class="active" href="/newsletter-v2.html" aria-current="page"><span>✉</span>Newsletter</a>
+          <a href="/stats.html"><span>↗</span>Public Stats</a>
+        </nav>
+        <div class="sidebar-footer"><span class="health-dot" id="sidebarHealthDot"></span><span id="sidebarHealthText">Checking systems</span></div>
+      </aside>
+
+      <main id="workspace" class="workspace">
+        <header class="page-head">
+          <div class="heading-row">
+            <button id="menuToggle" class="icon-button menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false">☰</button>
+            <div>
+              <p class="overline">Operations console</p>
+              <h1>Newsletter</h1>
+              <p>Automations, campaigns, audience and delivery health—without the clutter.</p>
+            </div>
+          </div>
+          <div class="header-controls">
+            <label class="compact-field">Range
+              <select id="rangeDays"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select>
+            </label>
+            <button id="refreshAll" class="button primary" type="button">Refresh</button>
+          </div>
+        </header>
+
+        <div class="status-bar" aria-live="polite">
+          <span id="integrationHealth" class="status-chip neutral">Checking integration</span>
+          <span id="lastUpdated">Not updated yet</span>
+        </div>
+
+        <nav class="section-nav" aria-label="Newsletter navigation">
+          <button class="active" data-view="overview" type="button">Overview</button>
+          <button data-view="automations" type="button">Automations</button>
+          <button data-view="campaigns" type="button">Campaigns</button>
+          <button data-view="audience" type="button">Audience</button>
+          <button data-view="templates" type="button">Templates</button>
+          <button data-view="analytics" type="button">Analytics</button>
+        </nav>
+
+        <div id="globalNotice" class="notice error" role="alert" hidden></div>
+
+        <section id="view-overview" class="view" aria-labelledby="overviewTitle">
+          <div class="section-title"><div><p class="overline">At a glance</p><h2 id="overviewTitle">Operational overview</h2></div></div>
+          <div id="overviewKpis" class="metric-grid skeleton-grid"></div>
+          <div class="content-grid two">
+            <article class="surface"><div class="panel-head"><div><p class="overline">Safety and health</p><h3>Needs attention</h3></div><button class="text-button" data-retry="overview" type="button">Retry</button></div><div id="attentionList" class="attention-list skeleton-lines"></div></article>
+            <article class="surface"><div class="panel-head"><div><p class="overline">Dependencies</p><h3>Integration health</h3></div></div><div id="healthGrid" class="health-grid skeleton-lines"></div></article>
+          </div>
+          <div id="overviewAutomations" class="content-grid two"></div>
+          <article class="surface"><div class="panel-head"><div><p class="overline">Latest events</p><h3>Recent activity</h3></div><button class="text-button" data-view-link="analytics" type="button">View analytics</button></div><div id="activityFeed" class="activity-feed skeleton-lines"></div></article>
+        </section>
+
+        <section id="view-automations" class="view" hidden aria-labelledby="automationsTitle">
+          <div class="section-title"><div><p class="overline">Always-on journeys</p><h2 id="automationsTitle">Automations</h2><p>N1 and N2 are shown here without changing their live configuration.</p></div></div>
+          <div id="automationCards" class="content-grid two skeleton-grid"></div>
+          <article class="surface"><div class="panel-head"><div><p class="overline">Content</p><h3>Automation templates</h3></div><span class="status-chip neutral">Read-only</span></div><div class="table-scroll"><table><thead><tr><th>Journey / step</th><th>Subject</th><th>Variables</th><th>Status</th><th></th></tr></thead><tbody id="automationTemplatesBody"></tbody></table></div></article>
+        </section>
+
+        <section id="view-campaigns" class="view" hidden aria-labelledby="campaignsTitle">
+          <div id="campaignListPanel">
+            <div class="section-title"><div><p class="overline">Broadcasts</p><h2 id="campaignsTitle">Campaigns</h2><p>Every campaign starts as a draft and must pass a matching owner test.</p></div><button id="startCampaign" class="button primary" type="button">New campaign</button></div>
+            <div class="toolbar"><label>Status<select id="campaignStatus"><option value="all">All</option><option value="draft">Draft</option><option value="scheduled">Scheduled</option><option value="sending">Sending</option><option value="sent">Sent</option><option value="failed">Failed</option></select></label><label class="search-field">Search<input id="campaignSearch" type="search" placeholder="Name or subject" /></label></div>
+            <article class="surface table-surface"><div class="table-scroll"><table><thead><tr><th>Campaign</th><th>Status</th><th>Recipients</th><th>Sent</th><th>Test</th><th>Created</th></tr></thead><tbody id="campaignsBody"></tbody></table></div><div id="campaignPager" class="pager"></div></article>
+          </div>
+
+          <div id="campaignWizard" hidden>
+            <div class="wizard-head"><button id="closeWizard" class="button secondary" type="button">Back to campaigns</button><div><p class="overline">Safe broadcast workflow</p><h2>Create campaign</h2></div></div>
+            <ol class="steps" aria-label="Campaign steps"><li class="active" data-step-label="1">Content</li><li data-step-label="2">Audience</li><li data-step-label="3">Test & timing</li><li data-step-label="4">Final review</li></ol>
+            <form id="campaignForm" class="surface wizard-surface" novalidate>
+              <section class="wizard-step" data-step="1">
+                <div class="form-grid"><label>Campaign name<input id="campaignName" required placeholder="July product update" /></label><label>Broadcast template<select id="campaignTemplate" required></select></label><label class="span-two">Subject<input id="campaignSubject" required placeholder="What’s new at Waysorted" /></label></div>
+                <div><p class="field-label">Personalization</p><div id="personalizationFields" class="form-grid"></div><details><summary>Advanced JSON</summary><label>Additional values<textarea id="advancedPersonalization" rows="5" placeholder='{"key":"value"}'></textarea></label></details></div>
+                <div class="preview-card"><div class="panel-head"><h3>Email preview</h3><button id="previewCampaign" class="button secondary" type="button">Refresh preview</button></div><p id="previewSubject" class="preview-subject">Choose a template to preview.</p><iframe id="campaignPreviewFrame" title="Campaign email preview"></iframe></div>
+              </section>
+              <section class="wizard-step" data-step="2" hidden>
+                <div class="form-grid"><label>Audience source<select id="audienceSource"><option value="all_active">All active subscribers</option><option value="tags">Subscriber tags</option><option value="custom">Custom email list</option></select></label><label id="tagAudienceField" hidden>Tags<input id="audienceTags" placeholder="paid, beta" /></label><label id="customAudienceField" class="span-two" hidden>Emails<textarea id="audienceEmails" rows="8" placeholder="person@example.com"></textarea></label></div>
+                <button id="previewAudience" class="button secondary" type="button">Calculate audience</button><div id="audiencePreview" class="audience-preview empty-state">Preview the audience before saving.</div>
+              </section>
+              <section class="wizard-step" data-step="3" hidden>
+                <div class="content-grid two"><article class="inset"><p class="overline">Required safety check</p><h3>Send an owner test</h3><p>The test always goes to <strong>anshbhatt140@gmail.com</strong>. Any later content or audience change invalidates it.</p><button id="saveAndTest" class="button primary" type="button">Save draft & send test</button><div id="testResult"></div></article><article class="inset"><p class="overline">Timing</p><h3>Delivery mode</h3><label><select id="deliveryMode"><option value="manual">Keep as draft</option><option value="send">Send now after confirmation</option><option value="schedule">Schedule after confirmation</option></select></label><label id="scheduleField" hidden>Schedule time<input id="scheduleAt" type="datetime-local" /></label><p id="dispatcherExplanation" class="safety-copy"></p></article></div>
+              </section>
+              <section class="wizard-step" data-step="4" hidden>
+                <div id="campaignReview" class="review-grid"></div><div class="confirmation-box"><label>Recipient count<input id="confirmCount" inputmode="numeric" /></label><label>Confirmation phrase<input id="confirmPhrase" autocomplete="off" placeholder="SEND 0" /></label><p id="confirmationHelp"></p></div><button id="finalCampaignAction" class="button danger" type="button" disabled>Complete action</button>
+              </section>
+              <div class="wizard-actions"><button id="previousStep" class="button secondary" type="button" hidden>Previous</button><span></span><button id="nextStep" class="button primary" type="button">Continue</button></div>
+            </form>
+          </div>
+        </section>
+
+        <section id="view-audience" class="view" hidden aria-labelledby="audienceTitle">
+          <div class="section-title"><div><p class="overline">Customer profiles</p><h2 id="audienceTitle">Audience</h2><p>Newsletter identity, journey history and authenticated plugin activity in one view.</p></div></div>
+          <div id="audienceKpis" class="metric-grid compact"></div>
+          <div class="toolbar"><label>Status<select id="audienceStatus"><option value="all">All</option><option value="active">Active</option><option value="unsubscribed">Unsubscribed</option><option value="bounced">Bounced</option></select></label><label>Tag<select id="audienceTag"><option value="all">All tags</option></select></label><label class="search-field">Search<input id="audienceSearch" type="search" placeholder="Name or email" /></label><label>Rows<select id="audiencePageSize"><option>25</option><option>50</option><option>100</option></select></label></div>
+          <article class="surface table-surface"><div class="table-scroll"><table><thead><tr><th>Customer</th><th>Status</th><th>Tags</th><th>Added</th><th></th></tr></thead><tbody id="audienceBody"></tbody></table></div><div id="audiencePager" class="pager"></div></article>
+        </section>
+
+        <section id="view-templates" class="view" hidden aria-labelledby="templatesTitle">
+          <div class="section-title"><div><p class="overline">Reusable content</p><h2 id="templatesTitle">Templates</h2><p>Broadcast templates are versioned. Automation templates are visible but read-only.</p></div><div class="header-controls"><button id="importTemplate" class="button secondary" type="button">Import HTML</button><input id="templateFile" type="file" accept=".html,.htm,text/html" hidden /><button id="newTemplate" class="button primary" type="button">New broadcast template</button></div></div>
+          <article class="surface"><div class="panel-head"><div><p class="overline">Editable</p><h3>Broadcast templates</h3></div></div><div id="broadcastTemplateGrid" class="template-grid"></div></article>
+          <article class="surface"><div class="panel-head"><div><p class="overline">Journey content</p><h3>Automation templates</h3></div><span class="status-chip neutral">Read-only</span></div><div id="automationTemplateGrid" class="template-grid"></div></article>
+        </section>
+
+        <section id="view-analytics" class="view" hidden aria-labelledby="analyticsTitle">
+          <div class="section-title"><div><p class="overline">Performance</p><h2 id="analyticsTitle">Analytics</h2><p>Range-aware delivery and engagement, split by broadcasts and automations.</p></div></div>
+          <div id="analyticsKpis" class="metric-grid"></div>
+          <article class="surface chart-panel"><div class="panel-head"><div><p class="overline">Daily trend</p><h3>Sent, opened, clicked and failed</h3></div></div><canvas id="deliveryChart"></canvas></article>
+          <div class="content-grid two"><article class="surface"><h3>Journey performance</h3><div class="table-scroll"><table><thead><tr><th>Journey</th><th>Sent</th><th>Open rate</th><th>CTR</th></tr></thead><tbody id="journeyAnalyticsBody"></tbody></table></div></article><article class="surface"><h3>Failure reasons</h3><div id="failureReasons" class="rank-list"></div></article></div>
+          <article class="surface"><h3>N1 step performance</h3><div class="table-scroll"><table><thead><tr><th>Step</th><th>Sent</th><th>Opened</th><th>Clicked</th><th>Open rate</th><th>CTR</th></tr></thead><tbody id="stepAnalyticsBody"></tbody></table></div><p id="trackingNote" class="footnote"></p></article>
+        </section>
+      </main>
+    </div>
+
+    <aside id="customerDrawer" class="drawer" aria-labelledby="customerDrawerTitle" aria-hidden="true"><div class="drawer-head"><div><p class="overline">Unified profile</p><h2 id="customerDrawerTitle">Customer</h2></div><button id="closeCustomerDrawer" class="icon-button" type="button" aria-label="Close customer profile">×</button></div><div id="customerDrawerBody" class="drawer-body"></div></aside><div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
+
+    <dialog id="campaignDetailDialog" class="modal"><div class="panel-head"><div><p class="overline">Broadcast draft</p><h2 id="campaignDetailTitle">Campaign</h2></div><button id="closeCampaignDetail" class="icon-button" aria-label="Close">×</button></div><div id="campaignDetailBody"></div><div id="campaignDetailActions" class="modal-actions"></div></dialog>
+    <dialog id="templateDialog" class="modal"><form id="templateForm" method="dialog"><div class="panel-head"><div><p class="overline">Broadcast content</p><h2 id="templateDialogTitle">New template</h2></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div><input id="templateEditId" type="hidden" /><label>Name<input id="templateName" required /></label><label>Description<input id="templateDescription" /></label><label>HTML<textarea id="templateHtml" rows="14" required></textarea></label><label>CSS<textarea id="templateCss" rows="6"></textarea></label><div class="modal-actions"><button class="button secondary" value="cancel">Cancel</button><button id="saveTemplate" class="button primary" type="button">Save template</button></div></form></dialog>
+    <dialog id="previewDialog" class="modal preview-modal"><div class="panel-head"><h2 id="templatePreviewTitle">Template preview</h2><button id="closePreview" class="icon-button" aria-label="Close">×</button></div><iframe id="templatePreviewFrame" title="Template preview"></iframe></dialog>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script src="/newsletter-v2.js" type="module"></script>
+  </body>
+</html>

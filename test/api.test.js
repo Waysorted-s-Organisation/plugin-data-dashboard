@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert";
+import { createServer } from "node:http";
 import request from "supertest";
 import app from "../src/server.js";
 import { MongoMemoryServer } from "mongodb-memory-server";
 import { MongoClient } from "mongodb";
-import { getDb } from "../src/db.js";
+import { closeDb, getDb } from "../src/db.js";
 
 // Mock auth middleware by overriding env
 process.env.DASHBOARD_BASIC_AUTH_USER = "test";
@@ -218,10 +219,97 @@ test("Dashboard APIs", async (t) => {
     assert.strictEqual(matchingCohort.day1, 1.0);
   });
 
+  await t.test("GET /api/newsletter/customers/:id joins authenticated activity", async (customerTest) => {
+    await eventsColl.insertOne({
+      eventType: "tool_used",
+      eventAt: new Date(),
+      sessionId: "customer-session",
+      tool: "palettable",
+      payload: { action: "export-palette" },
+      user: {
+        isAuthenticated: true,
+        userId: "newsletter-user-1",
+        email: "customer@example.com",
+        creditsRemaining: 18,
+      },
+    });
+    await eventsColl.insertOne({
+      eventType: "tool_used",
+      eventAt: new Date(),
+      sessionId: "fallback-session",
+      tool: "frame-gallery",
+      user: {
+        isAuthenticated: true,
+        userId: "different-user-id",
+        email: "fallback@example.com",
+      },
+    });
+    const received = [];
+    const upstream = createServer((req, res) => {
+      received.push({
+        url: req.url,
+        authorization: req.headers.authorization,
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      const fallback = req.url.endsWith("/43");
+      res.end(JSON.stringify({
+        success: true,
+        subscriber: {
+          id: fallback ? 43 : 42,
+          email: fallback ? "fallback@example.com" : "customer@example.com",
+          name: "Customer",
+          status: "active",
+          tags: [],
+        },
+        notification_profile: {
+          id: fallback ? 10 : 9,
+          external_user_id: fallback ? "missing-user-id" : "newsletter-user-1",
+          email: fallback ? "fallback@example.com" : "customer@example.com",
+        },
+        preferences: [],
+        suppressions: [],
+        enrollments: [],
+        deliveries: [],
+        broadcast_history: [],
+      }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    customerTest.after(() => upstream.close());
+    process.env.NEWSLETTER_API_URL = `http://127.0.0.1:${upstream.address().port}`;
+    process.env.NEWSLETTER_MANAGEMENT_TOKEN = "server-only-token";
+
+    const res = await request(app)
+      .get("/api/newsletter/customers/42")
+      .set("Authorization", authString);
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.body.product_activity.matched, true);
+    assert.strictEqual(res.body.product_activity.identity_match, "external_user_id");
+    assert.strictEqual(res.body.product_activity.latest_credit_balance, 18);
+    assert.strictEqual(res.body.product_activity.top_tools[0].tool, "palettable");
+    assert.strictEqual(received[0].url, "/api/management/subscribers/42");
+    assert.strictEqual(received[0].authorization, "Bearer server-only-token");
+    assert.strictEqual(JSON.stringify(res.body).includes("server-only-token"), false);
+
+    const fallbackRes = await request(app)
+      .get("/api/newsletter/customers/43")
+      .set("Authorization", authString);
+    assert.strictEqual(fallbackRes.status, 200);
+    assert.strictEqual(
+      fallbackRes.body.product_activity.identity_match,
+      "normalized_email"
+    );
+    assert.strictEqual(
+      fallbackRes.body.product_activity.top_tools[0].tool,
+      "frame-gallery"
+    );
+  });
+
   // Cleanup
   const snapshotsColl = db.collection("stats_snapshots");
   await eventsColl.deleteMany({});
   await engageColl.deleteMany({});
   await snapshotsColl.deleteMany({});
+  await closeDb();
   await mongod.stop();
 });

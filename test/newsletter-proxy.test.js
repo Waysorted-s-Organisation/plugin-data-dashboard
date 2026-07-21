@@ -69,11 +69,27 @@ test("newsletter proxy is authenticated, allowlisted, and server-side", async (t
   assert.equal(blocked.status, 403);
   assert.equal(received.length, 2);
 
+  const automations = await request(app)
+    .get("/api/newsletter/automations/n1_onboarding_activation")
+    .set("Authorization", basicAuth);
+  const templates = await request(app)
+    .get("/api/newsletter/content/templates?kind=all")
+    .set("Authorization", basicAuth);
+  const version = await request(app)
+    .put("/api/newsletter/templates/7")
+    .set("Authorization", basicAuth)
+    .send({ name: "Version 2" });
+  assert.equal(automations.status, 200);
+  assert.equal(templates.status, 200);
+  assert.equal(version.status, 200);
+  assert.equal(received[4].method, "PUT");
+  assert.deepEqual(received[4].body, { name: "Version 2" });
+
   const unsupported = await request(app)
     .get("/api/newsletter/internal/secrets")
     .set("Authorization", basicAuth);
   assert.equal(unsupported.status, 404);
-  assert.equal(received.length, 2);
+  assert.equal(received.length, 5);
 });
 
 

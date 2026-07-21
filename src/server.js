@@ -111,7 +111,18 @@ function newsletterConfig() {
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
 app.use(express.json({ limit: "5mb" }));
-app.use(morgan("tiny"));
+morgan.token("safe-url", (req) => {
+  try {
+    const parsed = new URL(req.originalUrl || req.url, "http://dashboard.local");
+    if (parsed.searchParams.has("search")) {
+      parsed.searchParams.set("search", "[redacted]");
+    }
+    return `${parsed.pathname}${parsed.search}`;
+  } catch (_error) {
+    return req.path || "[unavailable]";
+  }
+});
+app.use(morgan(":method :safe-url :status :res[content-length] - :response-time ms"));
 
 function parseDate(value, fallback) {
   if (!value) return fallback;
@@ -2049,12 +2060,19 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
 const NEWSLETTER_PROXY_PATHS = [
   /^\/overview$/,
   /^\/analytics$/,
+  /^\/system-health$/,
+  /^\/automations$/,
+  /^\/automations\/[a-z0-9_:-]+$/,
   /^\/campaigns$/,
   /^\/campaigns\/preview$/,
+  /^\/campaigns\/audience-preview$/,
   /^\/campaigns\/\d+$/,
   /^\/campaigns\/\d+\/actions$/,
+  /^\/campaigns\/\d+\/test-send$/,
   /^\/subscribers$/,
+  /^\/subscribers\/\d+$/,
   /^\/subscribers\/import$/,
+  /^\/content\/templates$/,
   /^\/templates$/,
   /^\/templates\/\d+$/,
   /^\/templates\/\d+\/preview$/,
@@ -2065,7 +2083,7 @@ function isAllowedNewsletterProxyPath(pathname) {
 }
 
 function newsletterMutationHasTrustedOrigin(req) {
-  if (!["POST", "DELETE"].includes(req.method)) return true;
+  if (!["POST", "PUT", "DELETE"].includes(req.method)) return true;
   const origin = safeString(req.headers.origin, 500);
   if (!origin) return true;
 
@@ -2090,7 +2108,7 @@ async function newsletterProxy(req, res) {
   if (!isAllowedNewsletterProxyPath(req.path)) {
     return res.status(404).json({ error: "Unsupported newsletter endpoint" });
   }
-  if (!["GET", "POST", "DELETE"].includes(req.method)) {
+  if (!["GET", "POST", "PUT", "DELETE"].includes(req.method)) {
     return res.status(405).json({ error: "Method not allowed" });
   }
   if (!newsletterMutationHasTrustedOrigin(req)) {
@@ -2115,7 +2133,7 @@ async function newsletterProxy(req, res) {
   }
 
   try {
-    const hasBody = ["POST", "DELETE"].includes(req.method) &&
+    const hasBody = ["POST", "PUT", "DELETE"].includes(req.method) &&
       req.body && Object.keys(req.body).length > 0;
     const upstream = await fetch(target, {
       method: req.method,
@@ -2145,7 +2163,184 @@ async function newsletterProxy(req, res) {
   }
 }
 
+async function newsletterCustomerProfile(req, res) {
+  const newsletter = newsletterConfig();
+  if (!newsletter.apiUrl || !newsletter.token) {
+    return res.status(503).json({
+      error: "Newsletter integration is not configured",
+    });
+  }
+  const subscriberId = Number(req.params.subscriberId);
+  if (!Number.isInteger(subscriberId) || subscriberId <= 0) {
+    return res.status(400).json({ error: "Invalid subscriber id" });
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), newsletter.timeoutMs);
+  try {
+    const target = new URL(
+      `/api/management/subscribers/${subscriberId}`,
+      `${newsletter.apiUrl}/`
+    );
+    const upstream = await fetch(target, {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${newsletter.token}`,
+      },
+      signal: controller.signal,
+    });
+    const newsletterProfile = await upstream.json().catch(() => ({}));
+    if (!upstream.ok) {
+      return res.status(upstream.status).json(newsletterProfile);
+    }
+
+    const profile = newsletterProfile.notification_profile || {};
+    const notificationProfileId = profile.id ? String(profile.id) : null;
+    const externalUserId = safeString(profile.external_user_id, 255);
+    const normalizedEmail = String(
+      profile.email || newsletterProfile.subscriber?.email || ""
+    ).trim().toLowerCase();
+    let identityMatch = null;
+    let events = [];
+    let totalEventCount = 0;
+    const identityCandidates = [];
+    if (notificationProfileId) {
+      identityCandidates.push({
+        name: "notification_profile_id",
+        clause: {
+          $or: [
+            { "user.notificationProfileId": notificationProfileId },
+            { "user.notification_profile_id": notificationProfileId },
+            { "user.notificationProfileId": Number(notificationProfileId) },
+            { "user.notification_profile_id": Number(notificationProfileId) },
+          ],
+        },
+      });
+    }
+    if (externalUserId) {
+      identityCandidates.push({
+        name: "external_user_id",
+        clause: { "user.userId": externalUserId },
+      });
+    }
+    if (normalizedEmail) {
+      identityCandidates.push({
+        name: "normalized_email",
+        clause: {
+          $expr: {
+            $eq: [
+              { $toLower: { $ifNull: ["$user.email", ""] } },
+              normalizedEmail,
+            ],
+          },
+        },
+      });
+    }
+    if (identityCandidates.length) {
+      const collection = await getEventsCollection();
+      for (const candidate of identityCandidates) {
+        const match = {
+          $and: [
+            candidate.clause,
+            { "user.isAuthenticated": true },
+            {
+              $or: [
+                { "user.userId": { $type: "string", $ne: "" } },
+                { "user.email": { $type: "string", $ne: "" } },
+              ],
+            },
+          ],
+        };
+        totalEventCount = await collection.countDocuments(match);
+        if (!totalEventCount) continue;
+        identityMatch = candidate.name;
+        events = await collection
+          .find(match)
+          .project({
+            _id: 0,
+            eventAt: 1,
+            eventType: 1,
+            tool: 1,
+            source: 1,
+            sessionId: 1,
+            payload: 1,
+            user: 1,
+          })
+          .sort({ eventAt: -1 })
+          .limit(1000)
+          .toArray();
+        break;
+      }
+    }
+
+    const sessions = new Set();
+    const toolCounts = new Map();
+    let creditsRemaining = null;
+    for (const event of events) {
+      if (event.sessionId) sessions.add(String(event.sessionId));
+      const tool = safeString(event.tool, 120);
+      if (tool) toolCounts.set(tool, (toolCounts.get(tool) || 0) + 1);
+      if (creditsRemaining === null) {
+        const candidate = event.user?.creditsRemaining ??
+          event.payload?.creditsRemaining ??
+          event.payload?.creditBalance;
+        const numeric = Number(candidate);
+        if (Number.isFinite(numeric)) creditsRemaining = numeric;
+      }
+    }
+    const topTools = Array.from(toolCounts.entries())
+      .map(([tool, count]) => ({ tool, count }))
+      .sort((a, b) => b.count - a.count || a.tool.localeCompare(b.tool))
+      .slice(0, 8);
+    const recentEvents = events.slice(0, 20).map((event) => ({
+      eventAt: event.eventAt,
+      eventType: safeString(event.eventType, 120),
+      tool: safeString(event.tool, 120),
+      source: safeString(event.source, 80),
+      action: safeString(
+        event.payload?.action ||
+          event.payload?.messageType ||
+          event.payload?.interactionAction ||
+          event.payload?.type,
+        120
+      ),
+    }));
+
+    res.setHeader("Cache-Control", "no-store");
+    return res.json({
+      ...newsletterProfile,
+      product_activity: {
+        matched: events.length > 0,
+        identity_match: events.length > 0 ? identityMatch : null,
+        coverage_message: events.length > 0
+          ? "Authenticated product activity is linked to this customer."
+          : "No matching authenticated plugin activity is available yet.",
+        last_activity_at: events[0]?.eventAt || null,
+        sessions: sessions.size,
+        event_count: totalEventCount,
+        top_tools: topTools,
+        latest_credit_balance: creditsRemaining,
+        recent_events: recentEvents,
+      },
+    });
+  } catch (error) {
+    const timeout = error && error.name === "AbortError";
+    console.error("Newsletter customer aggregation failed:", error);
+    return res.status(timeout ? 504 : 502).json({
+      error: timeout
+        ? "Customer profile request timed out"
+        : "Customer profile is unavailable",
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 app.use(readAuthGate);
+app.get(
+  "/api/newsletter/customers/:subscriberId",
+  newsletterCustomerProfile
+);
 app.use("/api/newsletter", newsletterProxy);
 app.use(express.static(publicDir));
 

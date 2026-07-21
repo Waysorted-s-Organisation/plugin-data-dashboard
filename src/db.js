@@ -67,6 +67,14 @@ export async function getDb() {
   return cachedDb;
 }
 
+export async function closeDb() {
+  if (cachedClient) {
+    await cachedClient.close();
+  }
+  cachedClient = null;
+  cachedDb = null;
+}
+
 export async function getEventsCollection() {
   const db = await getDb();
   return db.collection("plugin_analytics_events");
