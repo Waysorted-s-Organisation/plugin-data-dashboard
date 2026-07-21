@@ -1,376 +1,97 @@
-const usersBody = document.getElementById("usersBody");
-const kpiGrid = document.getElementById("kpiGrid");
-const statusLine = document.getElementById("statusLine");
-const refreshBtn = document.getElementById("refreshBtn");
-const exportBtn = document.getElementById("exportBtn");
-const searchInput = document.getElementById("searchInput");
-const toolBreakdownCanvas = document.getElementById("toolBreakdownChart");
-const toolBreakdownEmpty = document.getElementById("toolBreakdownEmpty");
+const $ = (id) => document.getElementById(id);
+const state = { page: 1, pageSize: 25, search: "", tool: "all", walletStatus: "all", subscriptionStatus: "all", lowCredit: false, sort: "email", days: "30" };
+let searchTimer = null;
 
-const CHART_COLORS = ["#5d9bff", "#78e6d8", "#ffb454", "#ff6b6b", "#2fd6a1", "#c084fc"];
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
+}
+function number(value) { return new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(Number(value || 0)); }
+function dateLabel(value) { return value ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "—"; }
+function human(value) { return String(value || "—").replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase()); }
+function setNotice(message = "") { $("globalNotice").hidden = !message; $("globalNotice").textContent = message; }
 
-let allUsers = [];
-let toolsMap = new Map();
-let sortColumn = null;
-let sortDirection = "asc";
-let searchQuery = "";
-let toolBreakdownChart = null;
+async function json(url) {
+  const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
+  return body;
+}
 
-async function loadCredits() {
-  statusLine.textContent = "Loading credits data...";
-  statusLine.className = "status";
+function metric(label, value, description) {
+  return `<article class="metric"><p class="metric-label">${escapeHtml(label)}</p><strong class="metric-value">${escapeHtml(value)}</strong><span class="metric-change">${escapeHtml(description)}</span></article>`;
+}
 
+function renderOverview(data) {
+  const s = data.summary;
+  $("creditKpis").innerHTML = [
+    metric("Billing wallets", number(s.wallets), `${number(s.walletsMissing)} not initialized`),
+    metric("Available credits", number(s.totalAvailableCredits), "Current wallet balance"),
+    metric("Held credits", number(s.totalHeldCredits), "Reserved, not yet completed"),
+    metric("Spent in range", number(s.creditsSpentInRange), `${number(s.completedUsesInRange)} completed uses`),
+    metric("Low-credit users", number(s.lowCreditUsers), `At or below ${data.threshold}`),
+  ].join("");
+  $("thresholdExplanation").textContent = `${data.threshold} credits or lower.`;
+  $("toolCoverage").textContent = data.dataQuality.unattributedUses ? `${data.dataQuality.unattributedUses} unattributed` : "Fully attributed";
+  $("toolCoverage").className = `status-chip ${data.dataQuality.unattributedUses ? "warn" : "good"}`;
+  renderTools(data.tools || []);
+  const current = $("toolFilter").value;
+  $("toolFilter").innerHTML = `<option value="all">All tools</option>${(data.tools || []).map((row) => `<option value="${escapeHtml(row.tool)}">${escapeHtml(human(row.tool))}</option>`).join("")}`;
+  $("toolFilter").value = Array.from($("toolFilter").options).some((o) => o.value === current) ? current : "all";
+  $("sourceStatus").textContent = "Live Waysorted database";
+  $("sourceStatus").className = "status-chip good";
+  $("lastUpdated").textContent = `Updated ${dateLabel(data.asOf)}`;
+}
+
+function renderTools(tools) {
+  if (!tools.length) { $("toolBars").innerHTML = `<div class="empty-state">No completed credit-consuming activity in this range.</div>`; return; }
+  const max = Math.max(...tools.map((row) => Number(row.creditsSpent || 0)), 1);
+  $("toolBars").innerHTML = tools.slice(0, 12).map((row) => `<div class="tool-bar-row"><div><strong>${escapeHtml(human(row.tool))}</strong><span>${number(row.completedUses)} uses · ${number(row.userCount)} users</span></div><div class="tool-bar-track"><i style="width:${Math.max(2, Number(row.creditsSpent || 0) / max * 100)}%"></i></div><b>${number(row.creditsSpent)}</b></div>`).join("");
+}
+
+function userParams() {
+  const params = new URLSearchParams({ page: state.page, pageSize: state.pageSize, search: state.search, tool: state.tool, walletStatus: state.walletStatus, subscriptionStatus: state.subscriptionStatus, lowCredit: String(state.lowCredit), sort: state.sort });
+  return params;
+}
+
+function renderUsers(data) {
+  const rows = data.items || [];
+  $("usersBody").innerHTML = rows.length ? rows.map((row) => `<tr data-id="${escapeHtml(row.id)}" tabindex="0"><td><strong>${escapeHtml(row.name || "Unnamed user")}</strong><small>${escapeHtml(row.email || "No email")}</small></td><td>${row.availableCredits === null ? "—" : number(row.availableCredits)}</td><td>${row.heldCredits === null ? "—" : number(row.heldCredits)}</td><td>${row.lifetimeSpentCredits === null ? "—" : number(row.lifetimeSpentCredits)}</td><td><span class="status-chip neutral">${escapeHtml(human(row.subscriptionStatus || "inactive"))}</span><small>${escapeHtml(human(row.subscriptionPlanCode))}</small></td><td>${row.topTool ? `${escapeHtml(human(row.topTool.tool))}<small>${number(row.topTool.creditsSpent)} credits</small>` : "—"}</td><td>${dateLabel(row.latestCreditAt)}</td><td><span class="status-chip ${row.walletStatus === "initialized" ? "good" : "warn"}">${row.walletStatus === "initialized" ? "Initialized" : "Not initialized"}</span></td></tr>`).join("") : `<tr><td colspan="8"><div class="empty-state">No users match these filters.</div></td></tr>`;
+  const p = data.pagination;
+  $("usersPager").innerHTML = `<span>${p.total ? `${(p.page - 1) * p.pageSize + 1}–${Math.min(p.page * p.pageSize, p.total)} of ${p.total}` : "0 users"}</span><div><button class="button secondary" data-page="${p.page - 1}" ${p.page <= 1 ? "disabled" : ""}>Previous</button> <button class="button secondary" data-page="${p.page + 1}" ${p.page >= p.pages ? "disabled" : ""}>Next</button></div>`;
+  $("usersBody").querySelectorAll("tr[data-id]").forEach((row) => { const open = () => openDrawer(row.dataset.id); row.addEventListener("click", open); row.addEventListener("keydown", (event) => { if (["Enter", " "].includes(event.key)) { event.preventDefault(); open(); } }); });
+  $("usersPager").querySelectorAll("button[data-page]").forEach((button) => button.addEventListener("click", () => { state.page = Number(button.dataset.page); loadUsers(); }));
+}
+
+async function loadUsers() {
+  $("usersBody").innerHTML = `<tr><td colspan="8"><div class="empty-state">Loading users…</div></td></tr>`;
+  try { renderUsers(await json(`/api/operations/credits/users?${userParams()}`)); }
+  catch (error) { $("usersBody").innerHTML = `<tr><td colspan="8"><div class="empty-state error-text">${escapeHtml(error.message)}</div></td></tr>`; }
+}
+
+async function loadOverview() {
+  $("creditKpis").innerHTML = ""; $("toolBars").innerHTML = ""; setNotice();
+  try { renderOverview(await json(`/api/operations/credits/overview?days=${encodeURIComponent(state.days)}`)); }
+  catch (error) { $("sourceStatus").textContent = "Data unavailable"; $("sourceStatus").className = "status-chip bad"; setNotice(`${error.message}. Values are intentionally not replaced with zeroes.`); $("creditKpis").innerHTML = metric("Credits", "Unavailable", "Check backend database configuration"); $("toolBars").innerHTML = `<div class="empty-state">Tool consumption unavailable.</div>`; }
+}
+
+async function openDrawer(userId) {
+  $("creditDrawer").classList.add("open"); $("creditDrawer").setAttribute("aria-hidden", "false"); $("drawerBackdrop").hidden = false; $("drawerBody").innerHTML = `<div class="empty-state">Loading credit profile…</div>`;
   try {
-    const res = await fetch("/api/plugin-analytics/credit-consumption");
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-
-    const toolsRes = await fetch("/api/plugin-analytics/user-top-tools");
-    const toolsData = toolsRes.ok ? await toolsRes.json() : { users: [] };
-
-    toolsMap = new Map();
-    for (const u of toolsData.users) {
-      toolsMap.set(u._id, u.topTools || []);
-    }
-
-    allUsers = data.users;
-
-    renderKPIs(allUsers);
-    renderFilteredTable();
-    fetchToolBreakdown();
-
-    statusLine.textContent = `Loaded ${allUsers.length} users.`;
-  } catch (error) {
-    statusLine.textContent = `Error: ${error.message}`;
-    statusLine.className = "status bad";
-  }
+    const data = await json(`/api/operations/credits/users/${encodeURIComponent(userId)}?days=${encodeURIComponent(state.days)}`);
+    const u = data.user; $("drawerTitle").textContent = u.name || u.email || "User";
+    $("drawerBody").innerHTML = `<div class="profile-hero"><span class="avatar">${escapeHtml((u.name || u.email || "U").slice(0, 2).toUpperCase())}</span><div><strong>${escapeHtml(u.name || "Unnamed user")}</strong><small>${escapeHtml(u.email || "No email")}</small></div></div><section class="profile-section"><h3>Wallet</h3><div class="definition-grid"><div><span>Available</span><strong>${u.availableCredits === null ? "Not initialized" : number(u.availableCredits)}</strong></div><div><span>Held</span><strong>${u.heldCredits === null ? "—" : number(u.heldCredits)}</strong></div><div><span>Lifetime spent</span><strong>${u.lifetimeSpentCredits === null ? "—" : number(u.lifetimeSpentCredits)}</strong></div><div><span>Subscription</span><strong>${escapeHtml(human(u.subscriptionStatus || "inactive"))}</strong></div></div></section><section class="profile-section"><h3>Completed usage in range</h3>${data.tools.length ? `<div class="rank-list">${data.tools.map((row) => `<div class="rank-item"><span>${escapeHtml(human(row.tool))}<small>${number(row.completedUses)} uses</small></span><strong>${number(row.creditsSpent)} credits</strong></div>`).join("")}</div>` : `<div class="empty-state">No completed usage in this range.</div>`}</section><section class="profile-section"><h3>Recent ledger</h3>${data.ledger.length ? `<div class="ledger-list">${data.ledger.map((row) => `<div><span class="ledger-delta ${row.deltaCredits < 0 ? "negative" : row.deltaCredits > 0 ? "positive" : ""}">${row.deltaCredits > 0 ? "+" : ""}${number(row.deltaCredits)}</span><p><strong>${escapeHtml(human(row.reason))}</strong><small>${escapeHtml(human(row.tool))} · ${dateLabel(row.createdAt)}</small></p></div>`).join("")}</div>` : `<div class="empty-state">No ledger entries.</div>`}</section>`;
+  } catch (error) { $("drawerBody").innerHTML = `<div class="empty-state error-text">${escapeHtml(error.message)}</div>`; }
 }
+function closeDrawer() { $("creditDrawer").classList.remove("open"); $("creditDrawer").setAttribute("aria-hidden", "true"); $("drawerBackdrop").hidden = true; }
+async function refresh() { await Promise.all([loadOverview(), loadUsers(), loadHealth()]); }
+async function loadHealth() { try { const health = await json("/api/operations/health"); $("sidebarHealthDot").className = "health-dot good"; $("sidebarHealthText").textContent = `${number(health.backendDatabase.wallets)} wallets connected`; } catch { $("sidebarHealthDot").className = "health-dot bad"; $("sidebarHealthText").textContent = "Backend unavailable"; } }
 
-function calculateBurnRate(users) {
-  if (!users.length) return 0;
-
-  let totalRate = 0;
-  let usersWithData = 0;
-
-  for (const u of users) {
-    const consumed = u.totalConsumed || 0;
-    if (consumed <= 0 || !u.lastSeen) continue;
-
-    const lastSeen = new Date(u.lastSeen);
-    const now = new Date();
-    const daysSinceActive = Math.max(1, (now - lastSeen) / 86400000);
-    // Estimate days of usage -- use a rough heuristic: totalConsumed spread
-    // over the period from first activity to now. Since we don't have firstSeen,
-    // we approximate using the ratio of consumed credits. Accounts with more
-    // consumption likely started earlier. Use daysSinceActive as a lower bound
-    // and scale by consumed amount relative to average.
-    const daysEstimate = Math.max(daysSinceActive, 1);
-    totalRate += consumed / daysEstimate;
-    usersWithData++;
-  }
-
-  return usersWithData > 0 ? totalRate / usersWithData : 0;
+function bind() {
+  $("refreshAll").addEventListener("click", refresh); $("rangeDays").addEventListener("change", () => { state.days = $("rangeDays").value; loadOverview(); });
+  $("userSearch").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.search = $("userSearch").value.trim(); state.page = 1; loadUsers(); }, 300); });
+  [["toolFilter", "tool"], ["walletFilter", "walletStatus"], ["subscriptionFilter", "subscriptionStatus"], ["sortFilter", "sort"]].forEach(([element, key]) => $(element).addEventListener("change", () => { state[key] = $(element).value; state.page = 1; loadUsers(); }));
+  $("lowCreditFilter").addEventListener("change", () => { state.lowCredit = $("lowCreditFilter").checked; state.page = 1; loadUsers(); }); $("pageSize").addEventListener("change", () => { state.pageSize = Number($("pageSize").value); state.page = 1; loadUsers(); });
+  $("closeDrawer").addEventListener("click", closeDrawer); $("drawerBackdrop").addEventListener("click", closeDrawer); document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeDrawer(); });
+  $("menuToggle").addEventListener("click", () => { const open = $("sidebar").classList.toggle("open"); $("menuToggle").setAttribute("aria-expanded", String(open)); });
 }
-
-function getDepletionDays(user) {
-  const consumed = user.totalConsumed || 0;
-  const remaining = user.creditsRemaining;
-  if (remaining === null || remaining === undefined || remaining <= 0) return null;
-  if (consumed <= 0) return null;
-
-  const lastSeen = new Date(user.lastSeen);
-  const now = new Date();
-  const daysSinceActive = Math.max(1, (now - lastSeen) / 86400000);
-  const dailyRate = consumed / Math.max(daysSinceActive, 1);
-
-  if (dailyRate <= 0) return null;
-  return Math.round(remaining / dailyRate);
-}
-
-function renderKPIs(users) {
-  let totalCreditsAvailable = 0;
-  let totalCreditsConsumed = 0;
-  let usersWithLowCredits = 0;
-
-  for (const u of users) {
-    totalCreditsAvailable += (u.creditsRemaining || 0);
-    totalCreditsConsumed += (u.totalConsumed || 0);
-    if (u.creditsRemaining !== null && u.creditsRemaining <= 5) {
-      usersWithLowCredits++;
-    }
-  }
-
-  const avgBurnRate = calculateBurnRate(users);
-  const burnRateDisplay = avgBurnRate > 0 ? avgBurnRate.toFixed(1) : "--";
-
-  kpiGrid.innerHTML = `
-    <div class="kpi-card">
-      <p class="kpi-label">Users Tracked</p>
-      <p class="kpi-value">${users.length}</p>
-      <p class="kpi-sub">Total users with credits data</p>
-    </div>
-    <div class="kpi-card">
-      <p class="kpi-label">Credits Consumed</p>
-      <p class="kpi-value">${totalCreditsConsumed}</p>
-      <p class="kpi-sub">Total credits spent across tools</p>
-    </div>
-    <div class="kpi-card">
-      <p class="kpi-label">Available Credits</p>
-      <p class="kpi-value">${totalCreditsAvailable}</p>
-      <p class="kpi-sub">Total active credits in ecosystem</p>
-    </div>
-    <div class="kpi-card ${usersWithLowCredits > 0 ? 'kpi-warn' : 'kpi-good'}">
-      <p class="kpi-label">Low Credit Users</p>
-      <p class="kpi-value">${usersWithLowCredits}</p>
-      <p class="kpi-sub">Users with &le; 5 credits</p>
-    </div>
-    <div class="kpi-card">
-      <p class="kpi-label">Avg Burn Rate</p>
-      <p class="kpi-value">${burnRateDisplay}</p>
-      <p class="kpi-sub">Credits consumed per user per day</p>
-    </div>
-  `;
-}
-
-async function fetchToolBreakdown() {
-  try {
-    const res = await fetch("/api/plugin-analytics/credit-consumption/by-tool");
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-
-    if (!data.tools || data.tools.length === 0) {
-      showToolBreakdownEmpty();
-      return;
-    }
-
-    renderToolBreakdownChart(data.tools);
-  } catch {
-    showToolBreakdownEmpty();
-  }
-}
-
-function showToolBreakdownEmpty() {
-  toolBreakdownEmpty.style.display = "block";
-}
-
-function renderToolBreakdownChart(tools) {
-  toolBreakdownEmpty.style.display = "none";
-
-  const labels = tools.map(t => t.tool);
-  const values = tools.map(t => t.totalAmount);
-  const colors = labels.map((_, i) => CHART_COLORS[i % CHART_COLORS.length]);
-
-  if (toolBreakdownChart) {
-    toolBreakdownChart.destroy();
-  }
-
-  toolBreakdownChart = new Chart(toolBreakdownCanvas, {
-    type: "doughnut",
-    data: {
-      labels,
-      datasets: [{
-        data: values,
-        backgroundColor: colors,
-        borderColor: "rgba(6, 11, 23, 0.8)",
-        borderWidth: 2,
-      }],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          position: "right",
-          labels: {
-            color: "#9eadd6",
-            font: { family: "Space Grotesk", size: 12 },
-            padding: 14,
-          },
-        },
-        tooltip: {
-          callbacks: {
-            label(ctx) {
-              const tool = tools[ctx.dataIndex];
-              return `${ctx.label}: ${tool.totalAmount} credits (${tool.count} uses)`;
-            },
-          },
-        },
-      },
-      cutout: "55%",
-    },
-  });
-}
-
-function getFilteredAndSortedUsers() {
-  let filtered = allUsers;
-
-  if (searchQuery) {
-    const q = searchQuery.toLowerCase();
-    filtered = filtered.filter(u => {
-      const name = (u.name || "").toLowerCase();
-      const email = (u.email || u._id || "").toLowerCase();
-      return name.includes(q) || email.includes(q);
-    });
-  }
-
-  if (sortColumn) {
-    filtered = [...filtered].sort((a, b) => {
-      let valA, valB;
-
-      if (sortColumn === "creditsRemaining") {
-        valA = a.creditsRemaining ?? -1;
-        valB = b.creditsRemaining ?? -1;
-      } else if (sortColumn === "totalConsumed") {
-        valA = a.totalConsumed || 0;
-        valB = b.totalConsumed || 0;
-      } else if (sortColumn === "lastSeen") {
-        valA = a.lastSeen ? new Date(a.lastSeen).getTime() : 0;
-        valB = b.lastSeen ? new Date(b.lastSeen).getTime() : 0;
-      } else if (sortColumn === "depletion") {
-        valA = getDepletionDays(a) ?? Infinity;
-        valB = getDepletionDays(b) ?? Infinity;
-      } else {
-        return 0;
-      }
-
-      if (valA < valB) return sortDirection === "asc" ? -1 : 1;
-      if (valA > valB) return sortDirection === "asc" ? 1 : -1;
-      return 0;
-    });
-  }
-
-  return filtered;
-}
-
-function renderFilteredTable() {
-  const users = getFilteredAndSortedUsers();
-  renderTable(users, toolsMap);
-  updateSortIndicators();
-}
-
-function renderTable(users, tMap) {
-  usersBody.innerHTML = "";
-
-  if (users.length === 0) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td colspan="6" class="muted" style="text-align:center; padding:24px;">No users found.</td>`;
-    usersBody.appendChild(tr);
-    return;
-  }
-
-  for (const u of users) {
-    const topTools = tMap.get(u._id) || [];
-
-    let toolsHtml = '<span class="muted">None</span>';
-    if (topTools.length > 0) {
-      toolsHtml = topTools.map(t => {
-        const mins = (t.timeSpentMs / 60000).toFixed(1);
-        return `<span class="pill">${t.tool} (${mins}m)</span>`;
-      }).join(" ");
-    }
-
-    let creditsClass = "pill-signal-high";
-    if (u.creditsRemaining <= 5) creditsClass = "pill-signal-low";
-    if (u.creditsRemaining <= 20 && u.creditsRemaining > 5) creditsClass = "pill-signal-medium";
-
-    const depletionDays = getDepletionDays(u);
-    let depletionHtml = '<span class="muted">--</span>';
-    if (depletionDays !== null) {
-      let depClass = "depletion-safe";
-      if (depletionDays <= 7) depClass = "depletion-danger";
-      else if (depletionDays <= 30) depClass = "";
-      depletionHtml = `<span class="depletion-estimate ${depClass}">~${depletionDays} days</span>`;
-    }
-
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>
-        <div class="event-title">${u.name || "Anonymous User"}</div>
-        <div class="event-detail">${u.email || u._id}</div>
-      </td>
-      <td>
-        ${u.creditsRemaining !== null ? `<span class="pill ${creditsClass}">${u.creditsRemaining} credits</span>` : '<span class="muted">Unknown</span>'}
-      </td>
-      <td>${u.totalConsumed || 0}</td>
-      <td>${toolsHtml}</td>
-      <td class="muted">${u.lastSeen ? new Date(u.lastSeen).toLocaleString() : "--"}</td>
-      <td>${depletionHtml}</td>
-    `;
-    usersBody.appendChild(tr);
-  }
-}
-
-function updateSortIndicators() {
-  const headers = document.querySelectorAll("th.sortable");
-  for (const th of headers) {
-    const indicator = th.querySelector(".sort-indicator");
-    const col = th.dataset.sort;
-    if (col === sortColumn) {
-      indicator.textContent = sortDirection === "asc" ? " ▲" : " ▼";
-    } else {
-      indicator.textContent = "";
-    }
-  }
-}
-
-function sortTable(column) {
-  if (sortColumn === column) {
-    sortDirection = sortDirection === "asc" ? "desc" : "asc";
-  } else {
-    sortColumn = column;
-    sortDirection = "asc";
-  }
-  renderFilteredTable();
-}
-
-function filterTable(query) {
-  searchQuery = query;
-  renderFilteredTable();
-}
-
-function exportCSV() {
-  const users = getFilteredAndSortedUsers();
-  if (users.length === 0) return;
-
-  const headers = ["Name", "Email", "Available Credits", "Credits Consumed", "Top Tools", "Last Active", "Projected Depletion"];
-  const rows = users.map(u => {
-    const topTools = toolsMap.get(u._id) || [];
-    const toolStr = topTools.map(t => `${t.tool} (${(t.timeSpentMs / 60000).toFixed(1)}m)`).join("; ");
-    const depletion = getDepletionDays(u);
-    return [
-      u.name || "Anonymous User",
-      u.email || u._id,
-      u.creditsRemaining !== null ? u.creditsRemaining : "",
-      u.totalConsumed || 0,
-      toolStr || "None",
-      u.lastSeen ? new Date(u.lastSeen).toISOString() : "",
-      depletion !== null ? `~${depletion} days` : "--",
-    ];
-  });
-
-  let csv = headers.join(",") + "\n";
-  for (const row of rows) {
-    csv += row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",") + "\n";
-  }
-
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `credit-consumption-${new Date().toISOString().slice(0, 10)}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
-// -- Event listeners --
-
-document.querySelectorAll("th.sortable").forEach(th => {
-  th.addEventListener("click", () => sortTable(th.dataset.sort));
-});
-
-searchInput.addEventListener("input", (e) => filterTable(e.target.value));
-exportBtn.addEventListener("click", exportCSV);
-refreshBtn.addEventListener("click", loadCredits);
-loadCredits();
+bind(); refresh();
