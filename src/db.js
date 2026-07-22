@@ -119,6 +119,31 @@ export async function getBackendSessionsCollection() {
   );
 }
 
+function backendCollection(envName, fallback) {
+  return getBackendDb().then((db) => db.collection(
+    String(process.env[envName] || fallback).trim()
+  ));
+}
+
+export const getBackendUsageReservationsCollection = () =>
+  backendCollection("BACKEND_USAGE_RESERVATIONS_COLLECTION", "usagereservations");
+export const getBackendStarterGrantsCollection = () =>
+  backendCollection("BACKEND_STARTER_GRANTS_COLLECTION", "startergrants");
+export const getBackendPurchasesCollection = () =>
+  backendCollection("BACKEND_PURCHASES_COLLECTION", "purchases");
+export const getBackendSubscriptionsCollection = () =>
+  backendCollection("BACKEND_SUBSCRIPTIONS_COLLECTION", "subscriptions");
+export const getBackendRefundsCollection = () =>
+  backendCollection("BACKEND_REFUNDS_COLLECTION", "refunds");
+export const getBackendFeedbackCollection = () =>
+  backendCollection("BACKEND_FEEDBACK_COLLECTION", "feedback");
+export const getBackendFeedbacksCollection = () =>
+  backendCollection("BACKEND_FEEDBACKS_COLLECTION", "feedbacks");
+export const getBackendFeatureRequestsCollection = () =>
+  backendCollection("BACKEND_FEATURE_REQUESTS_COLLECTION", "featurerequests");
+export const getBackendToolsCollection = () =>
+  backendCollection("BACKEND_TOOLS_COLLECTION", "tools");
+
 export async function closeDb() {
   if (cachedClient) {
     await cachedClient.close();
@@ -151,6 +176,7 @@ export async function ensureIndexes() {
   const events = await getEventsCollection();
 
   await Promise.all([
+    events.createIndex({ eventId: 1 }, { unique: true, sparse: true }),
     events.createIndex({ eventAt: -1 }),
     events.createIndex({ sessionId: 1, eventAt: 1 }),
     events.createIndex({ eventType: 1, eventAt: -1 }),

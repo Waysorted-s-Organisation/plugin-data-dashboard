@@ -1,10 +1,15 @@
 # Waysorted Operations Dashboard
 
-Owner-only operations console for three production data areas:
+Owner-only product-intelligence console built around the questions a product owner needs to answer:
 
-- **Credits** — billing wallets and completed credit-consuming tool activity.
+- **Summary** — joining, activation, return, completed work, credits and verified revenue.
+- **Users** — lifecycle segments and a joined 360° profile.
+- **Tools** — completion, release, expiry, repeat use and measurement coverage.
+- **User Journey** — signup-to-login-to-credited-activation funnel and mature cohort returns.
+- **Credits & Billing** — wallets, ledger-backed consumption, purchases, subscriptions and refunds.
 - **Newsletter** — N1/N2 automations, audience, templates, campaigns and delivery analytics.
-- **Recent Activity** — successful authentication sessions with the latest credited tool activity.
+- **Feedback & Requests** — normalized customer feedback and roadmap demand.
+- **Data Health** — freshness, coverage, telemetry state and API reliability.
 
 The dashboard intentionally does not present the retired Product Overview, Feature Intelligence, Heatmap or manually incremented public counters. Historical plugin telemetry remains stored for a future ingest repair, but is not treated as current operational data.
 
@@ -16,7 +21,7 @@ cp .env.example .env
 npm run dev
 ```
 
-Open `http://localhost:4080`. The root URL serves Credits.
+Open `http://localhost:4080`. The root URL serves the balanced Summary control center.
 
 ### Required production settings
 
@@ -35,20 +40,25 @@ Optional:
 
 `BACKEND_MONGODB_URI` never falls back to the analytics URI. Missing configuration returns an explicit `503`; the UI does not substitute zeroes.
 
-### Archived plugin ingest
+### Semantic plugin telemetry
 
-The compatibility ingest endpoint remains available:
+The compatibility ingest endpoint remains available, but current non-credit behavior is hidden until seven days of healthy semantic coverage exists:
 
 ```text
+POST /api/plugin-analytics/session
 POST /api/plugin-analytics/ingest
 ```
 
-It uses the separate analytics settings:
+The Figma plugin exchanges its existing Waysorted bearer credential for a short-lived analytics session. Events include stable `eventId` values so retries are deduplicated. Configure:
 
 - `MONGODB_URI`
 - `MONGODB_DB=plugin_data_dashboard`
-- `ANALYTICS_INGEST_TOKEN`
-- `ANALYTICS_INGEST_TOKEN_REQUIRED`
+- `WAYSORTED_API_URL`
+- `WAYSORTED_ANALYTICS_PROFILE_PATH=/api/user/profile`
+- `ANALYTICS_SIGNING_SECRET`
+- `ANALYTICS_SESSION_TTL_SECONDS=900`
+
+`ANALYTICS_INGEST_TOKEN` remains available only as a legacy migration fallback. The semantic contract covers plugin sessions, tool open/close, tool action start/complete/fail, feature use, active time, favorites, billing CTA interactions, user-visible errors and feedback submission.
 
 ## Operations APIs
 
@@ -57,7 +67,15 @@ All operations APIs are protected by dashboard Basic Auth and return `Cache-Cont
 - `GET /api/operations/credits/overview?days=30`
 - `GET /api/operations/credits/users?page=1&pageSize=25`
 - `GET /api/operations/credits/users/:userId?days=30`
-- `GET /api/operations/activity/recent-users?days=7&page=1&pageSize=25`
+- `GET /api/operations/summary?days=30`
+- `GET /api/operations/users?page=1&pageSize=25`
+- `GET /api/operations/users/:userId`
+- `GET /api/operations/tools?days=30`
+- `GET /api/operations/tools/:toolCode?days=30`
+- `GET /api/operations/lifecycle?days=90`
+- `GET /api/operations/commercial?days=30`
+- `GET /api/operations/feedback?days=90`
+- `GET /api/operations/data-health`
 - `GET /api/operations/health`
 - `GET /api/newsletter/customers/:subscriberId`
 - `/api/newsletter/*` — allowlisted server-side proxy to Newsletter management APIs.
@@ -70,7 +88,7 @@ Credit consumption counts committed reservation lifecycles, excludes released an
 npm test
 ```
 
-The isolated test suite covers authentication, wallet joins, email search, pagination, low-credit boundaries, reservation lifecycle accounting, activity grouping, Newsletter billing joins, sanitized health responses, and removal of retired pages/APIs.
+The isolated test suite covers authentication, wallet joins, lifecycle rules, revenue/refunds, tool-state classification, feedback normalization, pagination, low-credit boundaries, Newsletter joins, telemetry token validation and deduplication, sanitized health responses, and removal of retired pages/APIs.
 
 ## Vercel
 

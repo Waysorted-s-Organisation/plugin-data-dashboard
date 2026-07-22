@@ -344,8 +344,8 @@ export async function recentUsers(query = {}) {
   const { page, pageSize } = pageOptions(query);
   const start = rangeStart(query.days || 7);
   const sessions = await getBackendSessionsCollection();
-  const match = { user: { $type: "objectId" } };
-  if (start) match.createdAt = { $gte: start };
+  const match = { user: { $type: "objectId" }, completed: true };
+  if (start) match.$or = [{ completedAt: { $gte: start } }, { completedAt: null, createdAt: { $gte: start } }];
   const sessionRows = await sessions.find(match, {
     projection: { user: 1, source: 1, completedAt: 1, createdAt: 1 },
   }).sort({ completedAt: -1, createdAt: -1 }).toArray();

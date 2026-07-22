@@ -17,6 +17,17 @@ import {
   operationsHealth,
   recentUsers,
 } from "./operations.js";
+import {
+  productCommercial,
+  productDataHealth,
+  productFeedback,
+  productLifecycle,
+  productSummary,
+  productToolDetail,
+  productTools,
+  productUserDetail,
+  productUsers,
+} from "./product-intelligence.js";
 
 dotenv.config();
 
@@ -26,6 +37,7 @@ const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, "..", "public");
 const PORT = Number(process.env.PORT || 4080);
 let analyticsInitializationPromise = null;
+const operationsApiMetrics = { startedAt: new Date(), requests: 0, failures: 0, totalDurationMs: 0 };
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
@@ -40,6 +52,16 @@ morgan.token("safe-url", (req) => {
   }
 });
 app.use(morgan(":method :safe-url :status :res[content-length] - :response-time ms"));
+app.use((req, res, next) => {
+  if (!req.path.startsWith("/api/operations/")) return next();
+  const startedAt = process.hrtime.bigint();
+  res.once("finish", () => {
+    operationsApiMetrics.requests += 1;
+    operationsApiMetrics.totalDurationMs += Number(process.hrtime.bigint() - startedAt) / 1e6;
+    if (res.statusCode >= 500) operationsApiMetrics.failures += 1;
+  });
+  return next();
+});
 
 function safeString(value, maxLength = 180) {
   if (value === null || value === undefined) return null;
@@ -122,12 +144,62 @@ function readAuthGate(req, res, next) {
 function ingestAuthGate(req, res, next) {
   const token = String(process.env.ANALYTICS_INGEST_TOKEN || "").trim();
   const required = String(process.env.ANALYTICS_INGEST_TOKEN_REQUIRED || "").trim().toLowerCase() === "true";
-  if (!token || !required) return next();
-  if (safeString(req.headers["x-plugin-ingest-token"], 240) !== token) {
-    return res.status(401).json({ error: "Invalid ingest token" });
-  }
-  return next();
+  const sessionToken = safeString(req.headers["x-plugin-ingest-session"], 2000);
+  if (sessionToken && verifyAnalyticsSessionToken(sessionToken)) return next();
+  if (!required) return next();
+  if (token && safeString(req.headers["x-plugin-ingest-token"], 240) === token) return next();
+  return res.status(401).json({ error: "Invalid ingest token" });
 }
+
+function analyticsSigningSecret() {
+  return String(process.env.ANALYTICS_SIGNING_SECRET || "").trim();
+}
+
+function signAnalyticsSession(payload) {
+  const secret = analyticsSigningSecret();
+  if (!secret) return null;
+  const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = crypto.createHmac("sha256", secret).update(encoded).digest("base64url");
+  return `${encoded}.${signature}`;
+}
+
+function verifyAnalyticsSessionToken(token) {
+  const secret = analyticsSigningSecret();
+  if (!secret || typeof token !== "string") return null;
+  const [encoded, signature] = token.split(".");
+  if (!encoded || !signature) return null;
+  const expected = crypto.createHmac("sha256", secret).update(encoded).digest();
+  let supplied;
+  try { supplied = Buffer.from(signature, "base64url"); } catch { return null; }
+  if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    if (payload.aud !== "plugin-analytics" || Number(payload.exp) <= Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch { return null; }
+}
+
+app.post("/api/plugin-analytics/session", async (req, res) => {
+  const base = String(process.env.WAYSORTED_API_URL || "").trim().replace(/\/+$/, "");
+  const authorization = String(req.headers.authorization || "");
+  if (!base || !analyticsSigningSecret()) return res.status(503).json({ error: "Semantic analytics sessions are not configured" });
+  if (!authorization.startsWith("Bearer ")) return res.status(401).json({ error: "Waysorted authentication required" });
+  try {
+    const pathName = String(process.env.WAYSORTED_ANALYTICS_PROFILE_PATH || "/api/user/profile");
+    const profileResponse = await fetch(new URL(pathName, `${base}/`), { headers: { Accept: "application/json", Authorization: authorization }, signal: AbortSignal.timeout(8000) });
+    if (!profileResponse.ok) return res.status(401).json({ error: "Waysorted session is not valid" });
+    const profile = await profileResponse.json();
+    const subject = safeString(profile.id || profile._id || profile.userId || profile.email, 180);
+    if (!subject) return res.status(401).json({ error: "Waysorted identity is unavailable" });
+    const now = Math.floor(Date.now() / 1000); const ttl = Math.min(3600, Math.max(300, Number(process.env.ANALYTICS_SESSION_TTL_SECONDS || 900)));
+    const session = signAnalyticsSession({ sub: subject, aud: "plugin-analytics", iat: now, exp: now + ttl, schema: 1 });
+    res.setHeader("Cache-Control", "no-store");
+    return res.json({ token: session, expiresAt: new Date((now + ttl) * 1000).toISOString(), ingestUrl: "/api/plugin-analytics/ingest", schemaVersion: 1 });
+  } catch (error) {
+    console.error("Analytics session bootstrap failed:", error?.message || error);
+    return res.status(502).json({ error: "Waysorted authentication could not be verified" });
+  }
+});
 
 async function ensureAnalyticsReady() {
   analyticsInitializationPromise ||= ensureIndexes().catch((error) => {
@@ -166,11 +238,16 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
       const sessionId = safeString(event?.sessionId, 120) || envelope.sessionId || "unknown-session";
       const deviceId = safeString(event?.deviceId, 120) || envelope.deviceId || "unknown-device";
       const payload = sanitizeObject(event?.payload);
+      const eventAt = safeDate(event?.eventAt || event?.timestamp, envelope.sentAt);
+      const eventType = safeString(event?.eventType || event?.type, 120) || "unknown_event";
+      const eventId = safeString(event?.eventId, 180) || crypto.createHash("sha256").update(`${sessionId}|${eventType}|${eventAt.toISOString()}|${JSON.stringify(payload)}`).digest("hex");
       return {
+        eventId,
+        schemaVersion: Math.max(1, Number(event?.schemaVersion || body.schemaVersion || 1)),
         sessionId,
         deviceId,
-        eventType: safeString(event?.eventType || event?.type, 120) || "unknown_event",
-        eventAt: safeDate(event?.eventAt || event?.timestamp, envelope.sentAt),
+        eventType,
+        eventAt,
         receivedAt: now,
         source: safeString(event?.source, 80) || envelope.source,
         tool: safeString(event?.tool || payload.uiTool, 120) || "unknown",
@@ -180,8 +257,8 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
         plugin: envelope.plugin,
       };
     });
-    const result = await (await getEventsCollection()).insertMany(documents, { ordered: false });
-    return res.status(202).json({ accepted: documents.length, inserted: Object.keys(result.insertedIds).length });
+    const result = await (await getEventsCollection()).bulkWrite(documents.map((document) => ({ updateOne: { filter: { eventId: document.eventId }, update: { $setOnInsert: document }, upsert: true } })), { ordered: false });
+    return res.status(202).json({ accepted: documents.length, inserted: result.upsertedCount, duplicates: documents.length - result.upsertedCount });
   } catch (error) {
     console.error("Analytics ingest failed:", error?.message || error);
     return res.status(500).json({ error: "Failed to ingest analytics events" });
@@ -289,6 +366,42 @@ async function newsletterCustomerProfile(req, res) {
   }
 }
 
+async function newsletterAudienceIndex() {
+  const newsletter = newsletterConfig();
+  if (!newsletter.apiUrl || !newsletter.token) return new Map();
+  const index = new Map();
+  for (let page = 1; page <= 20; page += 1) {
+    const target = new URL("/api/management/subscribers", `${newsletter.apiUrl}/`);
+    target.searchParams.set("page", String(page));
+    target.searchParams.set("per_page", "100");
+    const response = await fetch(target, {
+      headers: { Accept: "application/json", Authorization: `Bearer ${newsletter.token}` },
+      signal: AbortSignal.timeout(newsletter.timeoutMs),
+    });
+    if (!response.ok) throw new Error(`Newsletter audience request failed (${response.status})`);
+    const body = await response.json();
+    for (const subscriber of body.subscribers || []) {
+      const email = String(subscriber.email || "").trim().toLowerCase();
+      if (email) index.set(email, subscriber);
+    }
+    if (page >= Number(body.pages || 1)) break;
+  }
+  return index;
+}
+
+async function newsletterProfileForEmail(email) {
+  const index = await newsletterAudienceIndex();
+  const subscriber = index.get(String(email || "").trim().toLowerCase());
+  if (!subscriber?.id) return null;
+  const newsletter = newsletterConfig();
+  const target = new URL(`/api/management/subscribers/${subscriber.id}`, `${newsletter.apiUrl}/`);
+  const response = await fetch(target, {
+    headers: { Accept: "application/json", Authorization: `Bearer ${newsletter.token}` },
+    signal: AbortSignal.timeout(newsletter.timeoutMs),
+  });
+  return response.ok ? response.json() : { subscriber };
+}
+
 function operationsFailure(res, error) {
   const unavailable = error?.code === "BACKEND_DATABASE_NOT_CONFIGURED";
   console.error("Operations API failed:", error?.message || error);
@@ -320,6 +433,65 @@ app.get("/api/operations/activity/recent-users", async (req, res) => {
   try { res.setHeader("Cache-Control", "no-store"); return res.json(await recentUsers(req.query)); }
   catch (error) { return operationsFailure(res, error); }
 });
+app.get("/api/operations/summary", async (req, res) => {
+  try { res.setHeader("Cache-Control", "no-store"); return res.json(await productSummary(req.query.days || 30)); }
+  catch (error) { return operationsFailure(res, error); }
+});
+app.get("/api/operations/users", async (req, res) => {
+  try {
+    let newsletter = new Map();
+    try { newsletter = await newsletterAudienceIndex(); } catch (error) { console.error("Newsletter audience join unavailable:", error?.message || error); }
+    res.setHeader("Cache-Control", "no-store");
+    return res.json(await productUsers(req.query, newsletter));
+  } catch (error) { return operationsFailure(res, error); }
+});
+app.get("/api/operations/users/:userId", async (req, res) => {
+  try {
+    const detail = await productUserDetail(req.params.userId);
+    if (!detail) return res.status(404).json({ error: "User not found" });
+    let newsletter = null;
+    try { newsletter = await newsletterProfileForEmail(detail.user.email); } catch (error) { console.error("Newsletter profile join unavailable:", error?.message || error); }
+    res.setHeader("Cache-Control", "no-store");
+    return res.json({ ...detail, newsletter });
+  } catch (error) { return operationsFailure(res, error); }
+});
+app.get("/api/operations/tools", async (req, res) => {
+  try { res.setHeader("Cache-Control", "no-store"); return res.json(await productTools(req.query.days || 30)); }
+  catch (error) { return operationsFailure(res, error); }
+});
+app.get("/api/operations/tools/:toolCode", async (req, res) => {
+  try { const detail = await productToolDetail(req.params.toolCode, req.query.days || 30); res.setHeader("Cache-Control", "no-store"); return detail ? res.json(detail) : res.status(404).json({ error: "Tool not found" }); }
+  catch (error) { return operationsFailure(res, error); }
+});
+app.get("/api/operations/lifecycle", async (req, res) => {
+  try { res.setHeader("Cache-Control", "no-store"); return res.json(await productLifecycle(req.query.days || 90)); }
+  catch (error) { return operationsFailure(res, error); }
+});
+app.get("/api/operations/commercial", async (req, res) => {
+  try { res.setHeader("Cache-Control", "no-store"); return res.json(await productCommercial(req.query.days || 30)); }
+  catch (error) { return operationsFailure(res, error); }
+});
+app.get("/api/operations/feedback", async (req, res) => {
+  try { res.setHeader("Cache-Control", "no-store"); return res.json(await productFeedback(req.query.days || 90)); }
+  catch (error) { return operationsFailure(res, error); }
+});
+app.get("/api/operations/data-health", async (_req, res) => {
+  try {
+    const newsletter = newsletterConfig();
+    const health = await productDataHealth(Boolean(newsletter.apiUrl && newsletter.token));
+    const completedRequests = operationsApiMetrics.requests;
+    health.api = {
+      status: operationsApiMetrics.failures ? "degraded" : "healthy",
+      requestsSinceStart: completedRequests,
+      failedRequests: operationsApiMetrics.failures,
+      averageResponseMs: completedRequests ? Math.round(operationsApiMetrics.totalDurationMs / completedRequests) : null,
+      measuringSince: operationsApiMetrics.startedAt,
+    };
+    res.setHeader("Cache-Control", "no-store");
+    return res.json(health);
+  }
+  catch (error) { return operationsFailure(res, error); }
+});
 app.get("/api/operations/health", async (_req, res) => {
   try {
     const newsletter = newsletterConfig();
@@ -331,9 +503,10 @@ app.get("/api/operations/health", async (_req, res) => {
 app.get("/api/newsletter/customers/:subscriberId", newsletterCustomerProfile);
 app.use("/api/newsletter", newsletterProxy);
 
-app.get("/", (_req, res) => res.sendFile(path.join(publicDir, "credits.html")));
+app.get("/", (_req, res) => res.sendFile(path.join(publicDir, "summary.html")));
 app.get("/newsletter.html", (_req, res) => res.sendFile(path.join(publicDir, "newsletter-v2.html")));
 app.get("/newsletter-v2.html", (_req, res) => res.redirect(302, "/newsletter.html"));
+app.get("/stats.html", (_req, res) => res.redirect(302, "/users.html"));
 app.use(express.static(publicDir));
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 

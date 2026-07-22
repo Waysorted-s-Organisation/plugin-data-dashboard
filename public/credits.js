@@ -1,3 +1,5 @@
+import { money, mountSidebar, metricCard } from "./intelligence-shared.js";
+mountSidebar("credits");
 const $ = (id) => document.getElementById(id);
 const state = { page: 1, pageSize: 25, search: "", tool: "all", walletStatus: "all", subscriptionStatus: "all", lowCredit: false, sort: "email", days: "30" };
 let searchTimer = null;
@@ -83,11 +85,23 @@ async function openDrawer(userId) {
   } catch (error) { $("drawerBody").innerHTML = `<div class="empty-state error-text">${escapeHtml(error.message)}</div>`; }
 }
 function closeDrawer() { $("creditDrawer").classList.remove("open"); $("creditDrawer").setAttribute("aria-hidden", "true"); $("drawerBackdrop").hidden = true; }
-async function refresh() { await Promise.all([loadOverview(), loadUsers(), loadHealth()]); }
+async function refresh() { await Promise.all([loadOverview(), loadUsers(), loadHealth(), loadCommercial()]); }
 async function loadHealth() { try { const health = await json("/api/operations/health"); $("sidebarHealthDot").className = "health-dot good"; $("sidebarHealthText").textContent = `${number(health.backendDatabase.wallets)} wallets connected`; } catch { $("sidebarHealthDot").className = "health-dot bad"; $("sidebarHealthText").textContent = "Backend unavailable"; } }
 
+async function loadCommercial() {
+  try {
+    const data = await json(`/api/operations/commercial?days=${encodeURIComponent(state.days)}`);
+    $("commercialMetrics").innerHTML = metricCard("Confirmed gross revenue", money(data.summary.grossRevenuePaise), data.summary.revenueStatus === "confirmed" ? "Captured payments only" : "No confirmed captured payments") + metricCard("Processed refunds", money(data.summary.refundsPaise), "Processed refunds only") + metricCard("Net revenue", money(data.summary.netRevenuePaise), "Captured payments minus processed refunds") + metricCard("Zero-credit users", number(data.summary.zeroCreditUsers), "Initialized wallets at zero");
+    const rank = (object) => Object.entries(object || {}).map(([key, value]) => `<p><strong>${escapeHtml(key.replaceAll("_", " "))}</strong><span>${number(value)}</span></p>`).join("") || '<div class="empty-state">No records in this period.</div>';
+    $("purchaseStatus").innerHTML = rank(data.purchaseAttempts);
+    $("starterStatus").innerHTML = rank(data.starterGrants);
+  } catch (error) {
+    $("commercialMetrics").innerHTML = metricCard("Commercial data", "Unavailable", error.message || "Could not load billing health");
+  }
+}
+
 function bind() {
-  $("refreshAll").addEventListener("click", refresh); $("rangeDays").addEventListener("change", () => { state.days = $("rangeDays").value; loadOverview(); });
+  $("refreshAll").addEventListener("click", refresh); $("rangeDays").addEventListener("change", () => { state.days = $("rangeDays").value; loadOverview(); loadCommercial(); });
   $("userSearch").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.search = $("userSearch").value.trim(); state.page = 1; loadUsers(); }, 300); });
   [["toolFilter", "tool"], ["walletFilter", "walletStatus"], ["subscriptionFilter", "subscriptionStatus"], ["sortFilter", "sort"]].forEach(([element, key]) => $(element).addEventListener("change", () => { state[key] = $(element).value; state.page = 1; loadUsers(); }));
   $("lowCreditFilter").addEventListener("change", () => { state.lowCredit = $("lowCreditFilter").checked; state.page = 1; loadUsers(); }); $("pageSize").addEventListener("change", () => { state.pageSize = Number($("pageSize").value); state.page = 1; loadUsers(); });

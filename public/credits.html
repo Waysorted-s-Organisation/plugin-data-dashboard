@@ -9,15 +9,7 @@
   <body>
     <a class="skip-link" href="#workspace">Skip to content</a>
     <div class="app-shell">
-      <aside class="sidebar" id="sidebar">
-        <div class="brand"><span class="brand-mark">W</span><span>Waysorted</span></div>
-        <nav aria-label="Operations navigation">
-          <a class="active" href="/credits.html" aria-current="page"><span>◎</span>Credits</a>
-          <a href="/newsletter.html"><span>✉</span>Newsletter</a>
-          <a href="/stats.html"><span>↗</span>Recent Activity</a>
-        </nav>
-        <div class="sidebar-footer"><span class="health-dot" id="sidebarHealthDot"></span><span id="sidebarHealthText">Checking data source</span></div>
-      </aside>
+      <aside class="sidebar" id="sidebar"></aside>
 
       <main id="workspace" class="workspace">
         <header class="page-head">
@@ -54,6 +46,12 @@
             </div>
           </article>
         </div>
+
+        <section aria-labelledby="commercialTitle">
+          <div class="section-title"><div><p class="overline">Commercial truth</p><h2 id="commercialTitle">Billing and payment health</h2><p>Only captured payments count as revenue. Pending and failed attempts remain funnel signals.</p></div></div>
+          <div id="commercialMetrics" class="metric-grid compact skeleton-grid"></div>
+          <div class="content-grid two"><article class="surface"><h3>Purchase attempts</h3><div id="purchaseStatus" class="rank-list"></div></article><article class="surface"><h3>Starter credit decisions</h3><div id="starterStatus" class="rank-list"></div></article></div>
+        </section>
 
         <section aria-labelledby="creditUsersTitle">
           <div class="section-title"><div><p class="overline">Customer wallets</p><h2 id="creditUsersTitle">Users</h2><p>Search by email or name and open a user for ledger details.</p></div></div>

@@ -1,3 +1,5 @@
+import { mountSidebar } from "./intelligence-shared.js";
+mountSidebar("newsletter");
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
@@ -104,7 +106,7 @@ async function api(path, options = {}) {
 }
 
 function handleError(error, context = "panel") {
-  console.error(`${context} failed`, error);
+  console.warn(`${context} failed`, error);
   const message = error?.message || "Something went wrong.";
   showNotice(`${context}: ${message}`);
   showToast(message, true);

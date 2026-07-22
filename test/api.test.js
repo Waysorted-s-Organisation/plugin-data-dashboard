@@ -31,7 +31,7 @@ test("credits-first operations APIs", async (t) => {
   const hourAgo = new Date(now.getTime() - 60 * 60 * 1000);
 
   await db.collection("users").insertMany([
-    { _id: u19, email: "alice@example.com", name: "Alice", creditsRemaining: 999, createdAt: now },
+    { _id: u19, email: "alice@example.com", name: "Alice", creditsRemaining: 999, favorites: ["Frames", "palettable"], createdAt: now },
     { _id: u20, email: "bob@example.com", name: "Bob", creditsRemaining: 999, createdAt: now },
     { _id: u21, email: "carol@example.com", name: "Carol", creditsRemaining: 999, createdAt: now },
     { _id: noWallet, email: "missing@example.com", name: "Missing Wallet", creditsRemaining: 50, createdAt: now },
@@ -56,9 +56,29 @@ test("credits-first operations APIs", async (t) => {
   ]);
   await db.collection("sessions").insertMany([
     { sessionId: "oauth", user: u19, source: "web", completed: true, completedAt: now, createdAt: hourAgo },
-    { sessionId: "otp", user: u20, createdAt: now },
+    { sessionId: "otp", user: u20, source: "otp", completed: true, completedAt: now, createdAt: now },
+    { sessionId: "incomplete-linked", user: u21, source: "figma", completed: false, createdAt: now },
     { sessionId: "pending", source: "web", createdAt: now },
   ]);
+  await db.collection("usagereservations").insertMany([
+    { _id: rCommitted, user: u19, toolCode: "frame_gallery", featureCode: "dpi_300", creditsReserved: 5, status: "committed", createdAt: hourAgo, committedAt: now },
+    { _id: rReleased, user: u19, toolCode: "pdf", featureCode: "import_pdf_editable", creditsReserved: 3, status: "released", createdAt: hourAgo, releasedAt: now, updatedAt: now },
+    { _id: rCompensated, user: u20, toolCode: "unit_converter", featureCode: "bleed", creditsReserved: 4, status: "committed", createdAt: hourAgo, committedAt: now, updatedAt: now },
+  ]);
+  await db.collection("startergrants").insertOne({ user: u19, grantedCredits: 300, status: "granted", createdAt: now });
+  await db.collection("purchases").insertMany([
+    { user: u19, productCode: "pro", kind: "subscription", status: "captured", amountPaise: 10000, currency: "INR", capturedAt: now, createdAt: now },
+    { user: u20, productCode: "topup", kind: "topup", status: "failed", amountPaise: 5000, currency: "INR", createdAt: now },
+  ]);
+  await db.collection("refunds").insertOne({ user: u19, purchase: new ObjectId(), amountPaise: 1000, status: "processed", createdAt: now, updatedAt: now });
+  await db.collection("subscriptions").insertOne({ user: u19, planCode: "pro", status: "active", createdAt: now });
+  await db.collection("tools").insertMany([
+    { name: "Frames to PDF", slug: "frames-to-pdf", category: "export", isActive: true },
+    { name: "Palettable", slug: "palettable", category: "color", isActive: true },
+  ]);
+  await db.collection("feedback").insertOne({ authId: String(u19), userId: u19, feedbackType: "score", score: 10, toolId: "frame_gallery", createdAt: now });
+  await db.collection("feedbacks").insertOne({ userId: u19, rating: 5, comment: "Helpful", isAnonymous: false, createdAt: now });
+  await db.collection("featurerequests").insertOne({ authorId: String(u19), title: "Batch export", status: "planned", board: "Frames to PDF", votes: 3, isDeleted: false, createdAt: now });
 
   await t.test("requires owner authentication", async () => {
     const response = await request(app).get("/api/operations/credits/overview");
@@ -117,6 +137,55 @@ test("credits-first operations APIs", async (t) => {
     assert.equal(response.body.items.find((row) => row.email === "bob@example.com").latestSource, "otp");
   });
 
+  await t.test("builds decision-ready summary from successful activity only", async () => {
+    const response = await request(app).get("/api/operations/summary?days=30").set("Authorization", basicAuth);
+    assert.equal(response.status, 200);
+    assert.equal(response.body.metrics.activeUsers.value, 2);
+    assert.equal(response.body.metrics.activatedUsers.value, 1);
+    assert.equal(response.body.metrics.completedJobs.value, 1);
+    assert.equal(response.body.metrics.netRevenuePaise.value, 9000);
+    assert.equal(response.body.coverage.activation, "Credited tool activation only");
+  });
+
+  await t.test("returns users, 360 profile, tools, lifecycle, commercial and feedback", async () => {
+    const users = await request(app).get("/api/operations/users?segment=activated&pageSize=25").set("Authorization", basicAuth);
+    assert.equal(users.status, 200);
+    assert.equal(users.body.items.length, 1);
+    assert.equal(users.body.items[0].email, "alice@example.com");
+    const profile = await request(app).get(`/api/operations/users/${u19}`).set("Authorization", basicAuth);
+    assert.equal(profile.status, 200);
+    assert.equal(profile.body.reservations.find((row) => row.rawToolCode === "frame_gallery").label, "Frames to PDF");
+    assert.equal(profile.body.feedback.find((row) => row.source === "current").score, 5);
+    assert.equal(profile.body.feedback.find((row) => row.source === "legacy").scale, 10);
+    const byTool = await request(app).get("/api/operations/users?tool=frames-to-pdf&pageSize=25").set("Authorization", basicAuth);
+    assert.equal(byTool.body.items.length, 1);
+    assert.equal(byTool.body.items[0].email, "alice@example.com");
+    const tools = await request(app).get("/api/operations/tools?days=30").set("Authorization", basicAuth);
+    assert.equal(tools.body.items.find((row) => row.key === "frames-to-pdf").completionRate, 100);
+    assert.equal(tools.body.items.find((row) => row.key === "unit-converter").compensatedJobs, 1);
+    assert.equal(tools.body.items.find((row) => row.key === "unit-converter").completedJobs, 0);
+    assert.equal(tools.body.items.find((row) => row.key === "palettable").coverage, "unavailable");
+    assert.equal(tools.body.items.find((row) => row.key === "palettable").favorites, 1);
+    const lifecycle = await request(app).get("/api/operations/lifecycle?days=90").set("Authorization", basicAuth);
+    assert.equal(lifecycle.body.stages.find((row) => row.key === "activated").users, 1);
+    assert.equal(lifecycle.body.cohorts.at(-1).return7dRate, null);
+    const commercial = await request(app).get("/api/operations/commercial?days=30").set("Authorization", basicAuth);
+    assert.equal(commercial.body.summary.netRevenuePaise, 9000);
+    const feedback = await request(app).get("/api/operations/feedback?days=90").set("Authorization", basicAuth);
+    assert.equal(feedback.body.summary.feedback, 2);
+    assert.equal(feedback.body.summary.averageScore, 5);
+    assert.equal(feedback.body.summary.featureRequests, 1);
+  });
+
+  await t.test("reports data coverage and excludes incomplete sessions", async () => {
+    const response = await request(app).get("/api/operations/data-health").set("Authorization", basicAuth);
+    assert.equal(response.status, 200);
+    assert.equal(response.body.coverage.sessions.completed, 2);
+    assert.equal(response.body.coverage.sessions.incompleteLinked, 1);
+    assert.equal(response.body.coverage.wallets.missing, 1);
+    assert.equal(response.body.coverage.revenue.unmatchedProcessedRefunds, 1);
+  });
+
   await t.test("health is sanitized", async () => {
     const response = await request(app).get("/api/operations/health").set("Authorization", basicAuth);
     assert.equal(response.status, 200);
@@ -147,21 +216,66 @@ test("credits-first operations APIs", async (t) => {
   });
 
   await t.test("retains the raw plugin ingest compatibility route", async () => {
-    const response = await request(app).post("/api/plugin-analytics/ingest").send({
+    const payload = {
       source: "figma-plugin-main",
       sessionId: "ingest-session",
       deviceId: "ingest-device",
       user: { isAuthenticated: true, userId: String(u19), email: "alice@example.com" },
-      events: [{ eventType: "tool_used", tool: "palette", payload: { action: "export" } }],
-    });
+      events: [{ eventId: "semantic-event-1", schemaVersion: 1, eventType: "tool_action_completed", tool: "palette", payload: { action: "export" } }],
+    };
+    const response = await request(app).post("/api/plugin-analytics/ingest").send(payload);
     assert.equal(response.status, 202);
     assert.equal(response.body.inserted, 1);
+    const duplicate = await request(app).post("/api/plugin-analytics/ingest").send(payload);
+    assert.equal(duplicate.body.inserted, 0);
+    assert.equal(duplicate.body.duplicates, 1);
     const analyticsClient = new MongoClient(process.env.MONGODB_URI);
     await analyticsClient.connect();
     const stored = await analyticsClient.db("analytics").collection("plugin_analytics_events").findOne({ sessionId: "ingest-session" });
     await analyticsClient.close();
     assert.equal(stored.tool, "palette");
+    assert.equal(stored.schemaVersion, 1);
     assert.equal(stored.user.userId, String(u19));
+  });
+
+  await t.test("issues short-lived semantic analytics sessions and accepts them", async (sessionTest) => {
+    const identity = createServer((req, res) => {
+      if (req.headers.authorization !== "Bearer valid-waysorted-token") {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: "unauthorized" }));
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ id: String(u19), email: "alice@example.com" }));
+    });
+    await new Promise((resolve) => identity.listen(0, "127.0.0.1", resolve));
+    sessionTest.after(() => identity.close());
+    process.env.WAYSORTED_API_URL = `http://127.0.0.1:${identity.address().port}`;
+    process.env.WAYSORTED_ANALYTICS_PROFILE_PATH = "/api/user/profile";
+    process.env.ANALYTICS_SIGNING_SECRET = "test-semantic-session-secret";
+    process.env.ANALYTICS_INGEST_TOKEN_REQUIRED = "true";
+    sessionTest.after(() => {
+      delete process.env.WAYSORTED_API_URL;
+      delete process.env.WAYSORTED_ANALYTICS_PROFILE_PATH;
+      delete process.env.ANALYTICS_SIGNING_SECRET;
+      delete process.env.ANALYTICS_INGEST_TOKEN_REQUIRED;
+    });
+
+    const bootstrap = await request(app).post("/api/plugin-analytics/session").set("Authorization", "Bearer valid-waysorted-token");
+    assert.equal(bootstrap.status, 200);
+    assert.equal(bootstrap.body.schemaVersion, 1);
+    assert.ok(bootstrap.body.token);
+    assert.ok(new Date(bootstrap.body.expiresAt) > new Date());
+
+    const ingest = await request(app).post("/api/plugin-analytics/ingest")
+      .set("x-plugin-ingest-session", bootstrap.body.token)
+      .send({ source: "figma-plugin-main", events: [{ eventId: "session-event-1", eventType: "tool_opened", tool: "palette" }] });
+    assert.equal(ingest.status, 202);
+    assert.equal(ingest.body.inserted, 1);
+
+    const rejected = await request(app).post("/api/plugin-analytics/ingest")
+      .set("x-plugin-ingest-session", `${bootstrap.body.token}broken`)
+      .send({ events: [{ eventId: "rejected-event", eventType: "tool_opened" }] });
+    assert.equal(rejected.status, 401);
   });
 
   await t.test("old analytics APIs and pages are removed", async () => {
@@ -171,7 +285,7 @@ test("credits-first operations APIs", async (t) => {
     }
     const root = await request(app).get("/").set("Authorization", basicAuth);
     assert.equal(root.status, 200);
-    assert.match(root.text, /<h1>Credits<\/h1>/);
+    assert.match(root.text, /What is happening in Waysorted\?/);
   });
 });
 
