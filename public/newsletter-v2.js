@@ -161,12 +161,27 @@ async function loadView(view) {
 
 function renderAutomationCard(item) {
   const sent = item.sent ?? item.delivery_statuses?.sent ?? 0;
-  const qualifying = item.enrollments ?? item.low_credit_triggers ?? 0;
+  const qualifying = item.checkout_triggers
+    ?? item.low_credit_triggers
+    ?? item.enrollments
+    ?? 0;
+  const qualifyingLabel = item.journey_key.startsWith("n2")
+    ? "Triggers"
+    : item.journey_key.startsWith("n3")
+      ? "Checkouts"
+      : "Enrollments";
+  const operatingRule = [
+    item.threshold_credits !== undefined
+      ? `Threshold ${number(item.threshold_credits)}`
+      : "",
+    item.cooldown_days ? `${number(item.cooldown_days)}-day cooldown` : "",
+    item.delay_minutes ? `${number(item.delay_minutes)}-minute delay` : "",
+  ].filter(Boolean).join(" · ");
   return `<article class="surface automation-card">
     <div class="panel-head"><div><p class="overline">${escapeHtml(item.trigger)}</p><h3>${escapeHtml(item.name)}</h3></div>${statusChip(item.enabled ? "enabled" : "disabled")}</div>
     <p>${escapeHtml(item.description || "")}</p>
-    <div class="automation-stats"><div><strong>${number(qualifying)}</strong><span>${item.journey_key.startsWith("n2") ? "Triggers" : "Enrollments"}</span></div><div><strong>${number(sent)}</strong><span>Sent</span></div><div><strong>${percent(item.open_rate)}</strong><span>Open rate</span></div><div><strong>${percent(item.ctr)}</strong><span>CTR</span></div></div>
-    <p class="footnote">Rollout: ${escapeHtml(item.rollout_mode || "—")}${item.threshold !== undefined ? ` · Threshold ${number(item.threshold)}` : ""}${item.cooldown_days ? ` · ${number(item.cooldown_days)}-day cooldown` : ""}</p>
+    <div class="automation-stats"><div><strong>${number(qualifying)}</strong><span>${qualifyingLabel}</span></div><div><strong>${number(sent)}</strong><span>Sent</span></div><div><strong>${percent(item.open_rate)}</strong><span>Open rate</span></div><div><strong>${percent(item.ctr)}</strong><span>CTR</span></div></div>
+    <p class="footnote">Rollout: ${escapeHtml(item.rollout_mode || "—")}${operatingRule ? ` · ${escapeHtml(operatingRule)}` : ""}</p>
   </article>`;
 }
 
@@ -203,9 +218,15 @@ async function loadOverview() {
   const labels = { database: "Database", redis: "Redis", background_jobs: "Background jobs", email_provider: "Email provider", dispatcher: "Dispatcher" };
   $("#healthGrid").innerHTML = Object.entries(components).map(([key, item]) => `<div class="health-item"><span>${escapeHtml(labels[key] || key)}</span><strong>${statusChip(item.status)}</strong>${item.last_heartbeat_at ? `<small>${escapeHtml(relativeTime(item.last_heartbeat_at))}</small>` : ""}</div>`).join("");
   $("#overviewAutomations").innerHTML = [
-    { ...overview.journeys.n1, name: "N1 · Onboarding & Activation", trigger: "New account activated", description: "Four-step onboarding sequence: immediate, day 1, day 3 and day 7." },
-    { ...overview.journeys.n2, name: "N2 · Low Credits", trigger: "Credits at or below threshold", description: "Immediate account-relevant reminder for qualified loyalty users." },
-  ].map(renderAutomationCard).join("");
+    { summary: overview.journeys.n1, name: "N1 · Onboarding & Activation", trigger: "New account activated", description: "Four-step onboarding sequence: immediate, day 1, day 3 and day 7." },
+    { summary: overview.journeys.n2, name: "N2 · Low Credits", trigger: "Credits at or below threshold", description: "Immediate account-relevant reminder for qualified loyalty users." },
+    { summary: overview.journeys.n3, name: "N3 · Purchase Retention", trigger: "Checkout incomplete after two hours", description: "One delayed reminder that is cancelled when the matching purchase completes." },
+  ].filter((item) => item.summary).map((item) => renderAutomationCard({
+    ...item.summary,
+    name: item.name,
+    trigger: item.trigger,
+    description: item.description,
+  })).join("");
 
   const symbols = { sent: "↗", opened: "◉", clicked: "↗", enrolled: "+", failed: "!", skipped: "–", cancelled: "×", bounced: "!", unsubscribed: "–" };
   $("#activityFeed").innerHTML = (overview.recent_activity || []).map((item) => `<div class="activity-item"><span class="activity-symbol">${symbols[item.type] || "•"}</span><div><p><strong>${escapeHtml(item.type.replaceAll("_", " "))}</strong> · ${escapeHtml(item.journey_key || item.source || "Newsletter")}</p><small>${escapeHtml(item.step_key || (item.campaign_id ? `Campaign ${item.campaign_id}` : ""))}</small></div><time>${escapeHtml(relativeTime(item.occurred_at))}</time></div>`).join("") || '<div class="empty-state">No recent newsletter activity.</div>';
