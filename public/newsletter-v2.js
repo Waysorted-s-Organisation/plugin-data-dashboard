@@ -186,10 +186,16 @@ function renderAutomationCard(item) {
 }
 
 function applyDispatcherState(overview) {
+  const sendOption = $('#deliveryMode option[value="send"]');
   const scheduleOption = $('#deliveryMode option[value="schedule"]');
-  if (!scheduleOption || !overview?.scheduled_dispatcher) return;
-  scheduleOption.disabled = !overview.scheduled_dispatcher.enabled;
-  scheduleOption.textContent = overview.scheduled_dispatcher.enabled
+  const controls = overview?.scheduled_dispatcher;
+  if (!sendOption || !scheduleOption || !controls) return;
+  sendOption.disabled = !controls.send_enabled;
+  sendOption.textContent = controls.send_enabled
+    ? "Send now after confirmation"
+    : "Send unavailable — safety locked";
+  scheduleOption.disabled = !controls.enabled;
+  scheduleOption.textContent = controls.enabled
     ? "Schedule after confirmation"
     : "Schedule unavailable — safety locked";
 }
@@ -285,7 +291,8 @@ async function openCampaignDetail(id) {
   const buttons = ['<button class="button secondary" id="detailClose" type="button">Close</button>'];
   if (item.status === "draft") {
     buttons.push('<button class="button secondary" id="detailTest" type="button">Send owner test</button>');
-    buttons.push(`<button class="button danger" id="detailSend" type="button" ${item.test_send?.fingerprint_valid ? "" : "disabled"}>Send campaign</button>`);
+    const sendEnabled = Boolean(state.overview?.scheduled_dispatcher?.send_enabled);
+    buttons.push(`<button class="button danger" id="detailSend" type="button" ${item.test_send?.fingerprint_valid && sendEnabled ? "" : "disabled"}>${sendEnabled ? "Send campaign" : "Bulk send safety locked"}</button>`);
   }
   $("#campaignDetailActions").innerHTML = buttons.join("");
   if (!$("#campaignDetailDialog").open) {
@@ -689,7 +696,9 @@ function bindEvents() {
   $("#deliveryMode").addEventListener("change", () => {
     const mode = $("#deliveryMode").value;
     $("#scheduleField").hidden = mode !== "schedule";
-    if (mode === "schedule" && state.overview && !state.overview.scheduled_dispatcher.enabled) {
+    if (mode === "send" && state.overview && !state.overview.scheduled_dispatcher.send_enabled) {
+      $("#dispatcherExplanation").textContent = "Bulk sending is unavailable because the production broadcast safety lock is on.";
+    } else if (mode === "schedule" && state.overview && !state.overview.scheduled_dispatcher.enabled) {
       $("#dispatcherExplanation").textContent = "Scheduling is unavailable because the production dispatcher safety lock is on.";
     } else $("#dispatcherExplanation").textContent = mode === "manual" ? "No email will be sent." : "A valid owner test and exact confirmation are required.";
   });
