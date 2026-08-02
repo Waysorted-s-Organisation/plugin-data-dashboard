@@ -8,7 +8,12 @@ import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 
-import { ensureIndexes, getEventsCollection } from "./db.js";
+import {
+  ensureIndexes,
+  getBackendUsersCollection,
+  getEventsCollection,
+} from "./db.js";
+import { enrichCampaignRecipients } from "./newsletter-recipients.js";
 import {
   creditOverview,
   creditUserDetail,
@@ -311,6 +316,32 @@ async function newsletterProxy(req, res) {
   }
   try {
     const hasBody = ["POST", "PUT", "DELETE"].includes(req.method) && req.body && Object.keys(req.body).length;
+    let requestBody = req.body;
+    if (
+      req.method === "POST"
+      && req.path === "/campaigns"
+      && req.body?.recipient_source
+    ) {
+      try {
+        const users = await (await getBackendUsersCollection())
+          .find(
+            { email: { $type: "string" }, name: { $type: "string", $ne: "" } },
+            { projection: { _id: 0, email: 1, name: 1 } }
+          )
+          .limit(10000)
+          .toArray();
+        requestBody = enrichCampaignRecipients(req.body, users);
+      } catch (error) {
+        console.error(
+          "Newsletter recipient name enrichment failed:",
+          error?.message || error
+        );
+        return res.status(503).json({
+          error: "Recipient names could not be loaded; campaign was not created",
+          code: "RECIPIENT_NAME_ENRICHMENT_UNAVAILABLE",
+        });
+      }
+    }
     const upstream = await fetch(target, {
       method: req.method,
       headers: {
@@ -318,7 +349,7 @@ async function newsletterProxy(req, res) {
         Authorization: `Bearer ${newsletter.token}`,
         ...(hasBody ? { "Content-Type": "application/json" } : {}),
       },
-      body: hasBody ? JSON.stringify(req.body) : undefined,
+      body: hasBody ? JSON.stringify(requestBody) : undefined,
       signal: controller.signal,
     });
     const body = await upstream.text();
