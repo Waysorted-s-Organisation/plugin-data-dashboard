@@ -163,12 +163,15 @@ function renderAutomationCard(item) {
   const sent = item.sent ?? item.delivery_statuses?.sent ?? 0;
   const qualifying = item.checkout_triggers
     ?? item.low_credit_triggers
+    ?? item.inactivity_triggers
     ?? item.enrollments
     ?? 0;
   const qualifyingLabel = item.journey_key.startsWith("n2")
     ? "Triggers"
     : item.journey_key.startsWith("n3")
       ? "Checkouts"
+      : item.journey_key.startsWith("n4")
+        ? "Inactive triggers"
       : "Enrollments";
   const operatingRule = [
     item.threshold_credits !== undefined
@@ -176,6 +179,7 @@ function renderAutomationCard(item) {
       : "",
     item.cooldown_days ? `${number(item.cooldown_days)}-day cooldown` : "",
     item.delay_minutes ? `${number(item.delay_minutes)}-minute delay` : "",
+    item.inactivity_days ? `${number(item.inactivity_days)}-day inactivity` : "",
   ].filter(Boolean).join(" · ");
   return `<article class="surface automation-card">
     <div class="panel-head"><div><p class="overline">${escapeHtml(item.trigger)}</p><h3>${escapeHtml(item.name)}</h3></div>${statusChip(item.enabled ? "enabled" : "disabled")}</div>
@@ -227,6 +231,7 @@ async function loadOverview() {
     { summary: overview.journeys.n1, name: "N1 · Onboarding & Activation", trigger: "New account activated", description: "Four-step onboarding sequence: immediate, day 1, day 3 and day 7." },
     { summary: overview.journeys.n2, name: "N2 · Low Credits", trigger: "Credits at or below threshold", description: "Immediate account-relevant reminder for qualified loyalty users." },
     { summary: overview.journeys.n3, name: "N3 · Purchase Retention", trigger: "Checkout incomplete after two hours", description: "One delayed reminder that is cancelled when the matching purchase completes." },
+    { summary: overview.journeys.n4, name: "N4 · Product Recall", trigger: "Verified inactivity for seven days", description: "One recall per inactivity episode, cancelled as soon as verified activity resumes." },
   ].filter((item) => item.summary).map((item) => renderAutomationCard({
     ...item.summary,
     name: item.name,
