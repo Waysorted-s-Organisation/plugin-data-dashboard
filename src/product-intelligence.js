@@ -172,6 +172,74 @@ async function pluginActivityDaysByIdentity(start, end) {
   return { byUserId, byEmail, byAnonymous, timezone, available, formatDay: dayKeyFormatter(timezone) };
 }
 
+/**
+ * The tool each identity used most, derived from plugin activity.
+ *
+ * The users table's top-tool column was built purely from credit-charged
+ * reservations, so a tool that charges nothing could never appear there and its
+ * users read as having used nothing at all. Telemetry knows what they actually
+ * opened, whether or not it billed them.
+ */
+async function pluginTopToolByIdentity(start, end) {
+  const byUserId = new Map();
+  const byEmail = new Map();
+  const byAnonymous = new Map();
+  try {
+    const collection = await getEventsCollection();
+    const rows = await collection
+      .aggregate([
+        {
+          $match: {
+            eventAt: { $gte: start, $lte: end },
+            eventType: { $nin: PASSIVE_EVENT_TYPES },
+            tool: { $nin: [null, "", "unknown"] },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              identity: { $ifNull: ["$user.userId", "$user.email"] },
+              anonymous: { $ifNull: ["$user.anonymousId", "$deviceId"] },
+              tool: "$tool",
+            },
+            events: { $sum: 1 },
+            lastEventAt: { $max: "$eventAt" },
+          },
+        },
+        { $sort: { events: -1 } },
+      ])
+      .toArray();
+
+    for (const row of rows) {
+      const normalized = normalizeToolCode(row._id?.tool);
+      // Navigation chrome is not a tool the user "used".
+      if (NON_TOOL_SURFACES.has(String(row._id?.tool || "").trim().toLowerCase())) continue;
+      if (NON_TOOL_SURFACES.has(normalized.key)) continue;
+
+      const identity = row._id?.identity;
+      const target = !identity ? byAnonymous : looksLikeEmail(identity) ? byEmail : byUserId;
+      const rawKey = identity || row._id?.anonymous;
+      if (!rawKey) continue;
+      const key = looksLikeEmail(rawKey) ? String(rawKey).toLowerCase() : String(rawKey);
+
+      const existing = target.get(key);
+      // Rows arrive ordered by event count, so the first one wins.
+      if (!existing || row.events > existing.events) {
+        target.set(key, {
+          key: normalized.key,
+          label: normalized.label,
+          events: asNumber(row.events),
+          credited: false,
+          lastEventAt: asDate(row.lastEventAt),
+        });
+      }
+    }
+  } catch (error) {
+    console.error("Plugin top-tool aggregation failed:", error?.message || error);
+  }
+  return { byUserId, byEmail, byAnonymous };
+}
+
 async function telemetryHealth(now = new Date()) {
   try {
     const collection = await getEventsCollection();
@@ -240,7 +308,7 @@ async function loadCore(range = null) {
   // do the windowing removes the mismatch entirely — every day in a window
   // index is in that window by construction, so no day-string filtering is
   // needed on read.
-  const [pluginActivity, pluginActivityCurrent, pluginActivityPrevious] = await Promise.all([
+  const [pluginActivity, pluginActivityCurrent, pluginActivityPrevious, pluginTopTools] = await Promise.all([
     // Wide index: cohort retention measures each user's return relative to
     // their own signup date, so it needs history beyond any single window.
     pluginActivityDaysByIdentity(new Date(Date.now() - lookbackDays * DAY_MS), new Date()),
@@ -250,6 +318,10 @@ async function loadCore(range = null) {
     range
       ? pluginActivityDaysByIdentity(range.previousStart, range.currentStart)
       : Promise.resolve(null),
+    pluginTopToolByIdentity(
+      range ? range.currentStart : new Date(Date.now() - lookbackDays * DAY_MS),
+      range ? range.now : new Date()
+    ),
   ]);
 
   return {
@@ -257,6 +329,7 @@ async function loadCore(range = null) {
     pluginActivity,
     pluginActivityCurrent: pluginActivityCurrent || pluginActivity,
     pluginActivityPrevious: pluginActivityPrevious || pluginActivity,
+    pluginTopTools,
   };
 }
 
@@ -276,6 +349,7 @@ function indexCore(core) {
     // index. The wide index is kept separately for cohort retention, which
     // measures each user against their own signup date rather than a window.
     pluginActivity: core.pluginActivityCurrent || core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") },
+    pluginTopTools: core.pluginTopTools || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map() },
     pluginActivityLifetime: core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") },
     billing: new Map(core.billings.map((row) => [id(row.user), row])),
     sessions: group(core.sessions), reservations: group(core.reservations), ledgers: group(core.ledgers),
@@ -368,7 +442,18 @@ function userFacts(user, indexed, range) {
     if (!current.latestAt || occurredAt > asDate(current.latestAt)) current.latestAt = occurredAt;
     tools.set(tool.key, current);
   }
-  const topTool = [...tools.values()].sort((a, b) => b.completed - a.completed || b.credits - a.credits)[0] || null;
+  const creditedTopTool = [...tools.values()].sort((a, b) => b.completed - a.completed || b.credits - a.credits)[0] || null;
+  // A tool that charges nothing produces no reservation, so it can never win
+  // the credited ranking above. Falling back to observed activity means the
+  // column shows what the person actually used rather than implying they used
+  // nothing. The `credited` flag lets the UI say which kind of evidence it is.
+  const observedTopTool =
+    indexed.pluginTopTools?.byUserId.get(userId) ||
+    indexed.pluginTopTools?.byEmail.get(String(user.email || "").toLowerCase()) ||
+    null;
+  const topTool = creditedTopTool
+    ? { ...creditedTopTool, credited: true }
+    : observedTopTool;
   return { userId, billing, sessions, reservations, committed, purchases, captured, currentSessions, currentCommitted, distinctDays, pluginActiveDays, activityAvailable, lastLogin, lastLoginDate, firstCommitted, segments, topTool };
 }
 

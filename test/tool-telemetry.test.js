@@ -283,3 +283,65 @@ test("one person spanning the legacy and modern identity formats counts once", a
   assert.equal(row.telemetry.sessions, 2, "both sessions still counted");
   assert.equal(row.telemetry.events, 2);
 });
+
+test("top tool shows a credit-free tool the user actually used", async (t) => {
+  const mongod = await MongoMemoryServer.create();
+  t.after(async () => { await closeDb(); await mongod.stop(); });
+  process.env.MONGODB_URI = mongod.getUri("analytics");
+  process.env.MONGODB_DB = "analytics";
+  process.env.BACKEND_MONGODB_URI = mongod.getUri("waysorted");
+  process.env.BACKEND_MONGODB_DB = "waysorted";
+  process.env.DASHBOARD_BASIC_AUTH_USER = "test";
+  process.env.DASHBOARD_BASIC_AUTH_PASS = "test";
+
+  const client = new MongoClient(mongod.getUri());
+  await client.connect();
+  t.after(() => client.close());
+  const now = new Date();
+  const freeUser = new ObjectId();
+  const paidUser = new ObjectId();
+  const idleUser = new ObjectId();
+
+  await client.db("waysorted").collection("users").insertMany([
+    { _id: freeUser, email: "free@example.com", createdAt: now },
+    { _id: paidUser, email: "paid@example.com", createdAt: now },
+    { _id: idleUser, email: "idle@example.com", createdAt: now },
+  ]);
+  // A credit-charging tool produces a reservation; a credit-free one never does.
+  await client.db("waysorted").collection("usagereservations").insertOne({
+    _id: new ObjectId(), user: paidUser, toolCode: "palettable", featureCode: "export_palette",
+    status: "committed", creditsReserved: 5, createdAt: now, committedAt: now, updatedAt: now,
+  });
+  await client.db("analytics").collection("plugin_analytics_events").insertMany([
+    ...[1, 2, 3].map((n) => ({
+      eventId: `free${n}`, schemaVersion: 2, isSemantic: true, eventType: "feature_used",
+      sessionId: "s1", deviceId: "d1", source: "main", tool: "comment-summarizer",
+      eventAt: new Date(now.getTime() - n * 1000), receivedAt: now, payload: {},
+      user: { isAuthenticated: true, userId: String(freeUser), email: null, anonymousId: null },
+    })),
+    // Navigation chrome must never win the column.
+    {
+      eventId: "chrome1", schemaVersion: 2, isSemantic: true, eventType: "feature_used",
+      sessionId: "s1", deviceId: "d1", source: "main", tool: "dashboard",
+      eventAt: now, receivedAt: now, payload: {},
+      user: { isAuthenticated: true, userId: String(freeUser), email: null, anonymousId: null },
+    },
+  ]);
+
+  const users = await request(app)
+    .get("/api/operations/users?days=30")
+    .set("Authorization", basicAuth)
+    .expect(200);
+
+  const free = users.body.items.find((r) => r.email === "free@example.com");
+  assert.equal(free.topTool.label, "Comment Summarizer", "shows the tool actually used");
+  assert.equal(free.topTool.credited, false, "flagged as charging no credits");
+  assert.equal(free.creditedJobs, 0, "and it genuinely billed nothing");
+
+  const paid = users.body.items.find((r) => r.email === "paid@example.com");
+  assert.equal(paid.topTool.label, "Palettable");
+  assert.equal(paid.topTool.credited, true, "credited work still wins where it exists");
+
+  const idle = users.body.items.find((r) => r.email === "idle@example.com");
+  assert.equal(idle.topTool, null, "genuine inactivity stays empty");
+});
