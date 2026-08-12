@@ -465,3 +465,73 @@ test("signed-out visitors are measured by their pseudonymous id", async (t) => {
   assert.equal(metrics.returningAnonymousVisitors.value, 1, "one of them came back");
   assert.equal(metrics.activeUsers.value, 0, "they are not counted as known accounts");
 });
+
+test("an unreadable analytics store is reported as unknown, never as inactivity", async (t) => {
+  // Two servers so the analytics store can be stopped while the backend stays
+  // up — the shape of a real outage (network blip, Atlas failover).
+  const backendMongo = await MongoMemoryServer.create();
+  const analyticsMongo = await MongoMemoryServer.create();
+  t.after(async () => { await closeDb(); await backendMongo.stop(); await analyticsMongo.stop().catch(() => {}); });
+
+  process.env.MONGODB_URI = analyticsMongo.getUri("analytics");
+  process.env.MONGODB_DB = "analytics";
+  process.env.BACKEND_MONGODB_URI = backendMongo.getUri("waysorted");
+  process.env.BACKEND_MONGODB_DB = "waysorted";
+  process.env.DASHBOARD_BASIC_AUTH_USER = "test";
+  process.env.DASHBOARD_BASIC_AUTH_PASS = "test";
+  delete process.env.REPORTING_TIMEZONE;
+
+  const backendClient = new MongoClient(process.env.BACKEND_MONGODB_URI);
+  await backendClient.connect();
+  t.after(() => backendClient.close());
+  const analyticsClient = new MongoClient(process.env.MONGODB_URI);
+  await analyticsClient.connect();
+
+  const now = new Date();
+  const user = new ObjectId();
+  await backendClient.db("waysorted").collection("users").insertOne({
+    _id: user, email: "outage@example.com", createdAt: new Date(now.getTime() - 300 * DAY_MS),
+  });
+  // Last login is old enough that login evidence alone would read as dormant.
+  await backendClient.db("waysorted").collection("sessions").insertOne({
+    user, source: "google", completed: true,
+    completedAt: new Date(now.getTime() - 35 * DAY_MS), createdAt: new Date(now.getTime() - 35 * DAY_MS),
+  });
+  await analyticsClient.db("analytics").collection("plugin_analytics_events").insertMany(
+    [1, 2, 3].map((d) => pluginEvent({
+      eventId: `o${d}`, eventType: "feature_used",
+      eventAt: new Date(now.getTime() - d * DAY_MS),
+      user: { isAuthenticated: true, userId: String(user), email: null, anonymousId: null },
+    }))
+  );
+
+  const healthy = await request(app)
+    .get("/api/operations/users?days=30")
+    .set("Authorization", basicAuth)
+    .expect(200);
+  const healthyRow = healthy.body.items.find((r) => r.email === "outage@example.com");
+  assert.equal(healthyRow.pluginActivityAvailable, true);
+  assert.equal(healthyRow.pluginActiveDays, 3);
+  assert.ok(healthyRow.segments.includes("returning"), "readable activity proves the return");
+  assert.ok(!healthyRow.segments.includes("dormant"));
+
+  // Take the analytics store away mid-flight.
+  await analyticsClient.close();
+  await closeDb();
+  await analyticsMongo.stop();
+
+  const broken = await request(app)
+    .get("/api/operations/users?days=30")
+    .set("Authorization", basicAuth)
+    .expect(200);
+  const brokenRow = broken.body.items.find((r) => r.email === "outage@example.com");
+
+  assert.equal(brokenRow.pluginActivityAvailable, false, "the read failure is reported");
+  assert.equal(brokenRow.pluginActiveDays, null, "not zero — zero would be a measurement");
+  assert.equal(brokenRow.activeDaysInRange, null, "likewise unknown, not zero");
+  assert.ok(
+    !brokenRow.segments.includes("dormant"),
+    "an outage must not convert an active user into a churn-risk entry"
+  );
+  assert.ok(!brokenRow.segments.includes("at_risk"), "nor into at_risk");
+});
