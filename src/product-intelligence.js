@@ -600,7 +600,15 @@ export async function productSummary(days = 30) {
     unattributed ? { severity: "info", title: `${unattributed} terminal jobs are unattributed`, detail: "They remain visible but are not assigned to a product tool.", href: "/data-health.html" } : null,
     stalledCheckouts.length ? { severity: "critical", title: `${stalledCheckouts.length} checkouts have not settled`, detail: "Started over an hour ago and still not captured. If money left the customer's account, they have paid and received nothing.", href: "/credits.html" } : null,
     unmatchedRefunds ? { severity: "warning", title: `${unmatchedRefunds} processed refunds lack a captured purchase match`, detail: "They are excluded from current revenue until the commercial records are reconciled.", href: "/data-health.html" } : null,
-    telemetry.status !== "healthy" ? { severity: "critical", title: "Non-credit behavior tracking is stale", detail: telemetry.message, href: "/data-health.html" } : null,
+    // Freshness, not an outage. Tool and user metrics are computed from
+    // telemetry regardless of this status, so raising it as critical put a
+    // permanent red alert on a dashboard whose data was fine — and a status
+    // that is always on is a status nobody reads.
+    telemetry.status === "unavailable"
+      ? { severity: "warning", title: "No plugin activity has been received", detail: telemetry.message, href: "/data-health.html" }
+      : telemetry.status === "stale"
+        ? { severity: "info", title: "Plugin activity is quiet", detail: telemetry.message, href: "/data-health.html" }
+        : null,
   ].filter(Boolean);
   const changed = Object.entries(metrics).filter(([key]) => !["grossRevenuePaise", "refundsPaise"].includes(key)).sort((a, b) => Math.abs(b[1].change) - Math.abs(a[1].change)).slice(0, 3).map(([key, value]) => ({ metric: key, direction: value.change > 0 ? "up" : value.change < 0 ? "down" : "flat", change: value.change, current: value.value, previous: value.previous }));
   return { asOf: range.now, period: { days: range.days, currentStart: range.currentStart, previousStart: range.previousStart }, coverage: { activation: "Credited tool activation only", telemetry }, metrics, whatChanged: changed, needsAttention: attention };
