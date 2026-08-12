@@ -35,6 +35,8 @@ Open `http://localhost:4080`. The root URL serves the balanced Summary control c
 Optional:
 
 - `CREDIT_LOW_THRESHOLD=20`
+- `REPORTING_TIMEZONE` — timezone for calendar-day bucketing of activity and returns. Defaults to `UTC`. Set to the timezone your users are in (e.g. `Asia/Kolkata`) so a return is counted on the day it felt like to them.
+- `ANALYTICS_ACTIVITY_LOOKBACK_DAYS=400` — how far back plugin activity is aggregated for cohort retention.
 - `NEWSLETTER_PROXY_TIMEOUT_MS=15000`
 - Backend collection-name overrides listed in `.env.example`.
 

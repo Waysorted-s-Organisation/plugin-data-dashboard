@@ -32,7 +32,15 @@ import {
   productTools,
   productUserDetail,
   productUsers,
+  SEMANTIC_EVENT_TYPES,
 } from "./product-intelligence.js";
+
+/**
+ * Shared vocabulary between the ingest and the aggregations. Events outside it
+ * are still stored — they are simply flagged so consumers can choose between
+ * the curated set and the complete record.
+ */
+const SEMANTIC_EVENT_TYPE_SET = new Set(SEMANTIC_EVENT_TYPES);
 
 dotenv.config();
 
@@ -99,10 +107,17 @@ function anonymousId(seed) {
 
 function normalizeUser(value, fallbackSeed) {
   const user = value && typeof value === "object" ? value : {};
-  const inferredId = safeString(user.userId || user.id || user._id || user.email, 180);
+  // Email is excluded from the id resolution on purpose. It used to be the last
+  // fallback, so user.userId held an account id on some events and an email
+  // address on others; the same person then resolved to two identities and
+  // neither joined reliably against the backend users collection. Email is
+  // still captured in its own field below and can be resolved to a real user
+  // record there.
+  const inferredId = safeString(user.userId || user.id || user._id, 180);
+  const inferredEmail = safeString(user.email, 200);
   const isAuthenticated = typeof user.isAuthenticated === "boolean"
     ? user.isAuthenticated
-    : Boolean(inferredId || user.email);
+    : Boolean(inferredId || inferredEmail);
   const creditValue = Number(
     user.creditsRemaining ?? user.billing?.wallet?.availableCredits
   );
@@ -113,7 +128,7 @@ function normalizeUser(value, fallbackSeed) {
       ? null
       : safeString(user.anonymousId || user.anonId, 180) || anonymousId(fallbackSeed),
     name: isAuthenticated ? safeString(user.name, 160) : null,
-    email: isAuthenticated ? safeString(user.email, 200) : null,
+    email: isAuthenticated ? inferredEmail : null,
     identitySource: safeString(user.identitySource, 80) || (isAuthenticated ? "authenticated" : "anonymous"),
     creditsRemaining: Number.isFinite(creditValue) ? Math.max(0, creditValue) : null,
   };
@@ -252,6 +267,14 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
         sessionId,
         deviceId,
         eventType,
+        // Emitters from schemaVersion 2 onward send every event and mark which
+        // belong to the curated semantic vocabulary. Events from older builds
+        // predate the flag but were filtered to semantic types before sending,
+        // so they are semantic by construction.
+        isSemantic:
+          typeof event?.isSemantic === "boolean"
+            ? event.isSemantic
+            : SEMANTIC_EVENT_TYPE_SET.has(eventType),
         eventAt,
         receivedAt: now,
         source: safeString(event?.source, 80) || envelope.source,
