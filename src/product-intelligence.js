@@ -464,13 +464,25 @@ function userFacts(user, indexed, range) {
   // rather than "what are they using".
   const creditedAt = creditedTopTool ? asDate(creditedTopTool.latestAt) : null;
   const observedAt = observedTopTool ? asDate(observedTopTool.lastEventAt) : null;
+  // When the person was last seen doing anything — signing in, running a
+  // credited job, or using any tool. Login alone cannot answer this: the plugin
+  // authenticates from a stored token and creates no new session, so a daily
+  // user's "last login" can sit weeks in the past while they are active now.
+  const lastActiveAt = [lastLoginDate, creditedAt, observedAt]
+    .filter((value) => value instanceof Date && !Number.isNaN(value.getTime()))
+    .sort((a, b) => a - b)
+    .at(-1) || null;
+  const lastActiveSource =
+    lastActiveAt === observedAt && observedAt ? "plugin"
+      : lastActiveAt === creditedAt && creditedAt ? "tool job"
+        : lastActiveAt ? "login" : null;
   const topTool =
     creditedTopTool && (!observedAt || (creditedAt && creditedAt >= observedAt))
       ? { ...creditedTopTool, credited: true, lastUsedAt: creditedAt }
       : observedTopTool
         ? { ...observedTopTool, lastUsedAt: observedAt }
         : null;
-  return { userId, billing, sessions, reservations, committed, purchases, captured, currentSessions, currentCommitted, distinctDays, pluginActiveDays, activityAvailable, activated, lastLogin, lastLoginDate, firstCommitted, segments, topTool };
+  return { userId, billing, sessions, reservations, committed, purchases, captured, currentSessions, currentCommitted, distinctDays, pluginActiveDays, activityAvailable, activated, lastActiveAt, lastActiveSource, lastLogin, lastLoginDate, firstCommitted, segments, topTool };
 }
 
 /**
@@ -640,7 +652,7 @@ export async function productUsers(query = {}, newsletterByEmail = new Map()) {
     const latestSource = facts.lastLogin?.source || null;
     const latestCountry = facts.lastLogin?.countryCode || billing?.pricingCountry || null;
     const newsletterProfile = newsletterByEmail.get(String(user.email || "").toLowerCase()) || null;
-    return { id: facts.userId, name: user.name || null, email: user.email || null, picture: user.picture || null, joinedAt: user.createdAt || null, segments: facts.segments, lifecycleStage: resolveLifecycleStage(facts, billing), lastLoginAt: facts.lastLoginDate, latestLoginSource: latestSource, country: latestCountry, successfulLogins: facts.sessions.length, pluginActiveDays: facts.activityAvailable ? facts.pluginActiveDays : null, activeDaysInRange: facts.activityAvailable ? facts.distinctDays.size : null, pluginActivityAvailable: facts.activityAvailable, creditedJobs: facts.committed.length, creditedJobsInRange: facts.currentCommitted.length, completedJobs: facts.committed.length, jobsInRange: facts.currentCommitted.length, topTool: facts.topTool, toolKeys: [...new Set(facts.committed.map((row) => normalizeToolCode(row.toolCode, row.featureCode).key))], walletStatus: billing ? "initialized" : "missing", availableCredits: billing ? asNumber(billing.availableCredits) : null, heldCredits: billing ? asNumber(billing.heldCredits) : null, subscriptionStatus: billing?.subscriptionStatus || null, subscriptionPlan: billing?.subscriptionPlanCode || null, newsletter: newsletterProfile ? { id: newsletterProfile.id, status: newsletterProfile.status, tags: newsletterProfile.tags || [] } : null };
+    return { id: facts.userId, name: user.name || null, email: user.email || null, picture: user.picture || null, joinedAt: user.createdAt || null, segments: facts.segments, lifecycleStage: resolveLifecycleStage(facts, billing), lastLoginAt: facts.lastLoginDate, lastActiveAt: facts.lastActiveAt, lastActiveSource: facts.lastActiveSource, latestLoginSource: latestSource, country: latestCountry, successfulLogins: facts.sessions.length, pluginActiveDays: facts.activityAvailable ? facts.pluginActiveDays : null, activeDaysInRange: facts.activityAvailable ? facts.distinctDays.size : null, pluginActivityAvailable: facts.activityAvailable, creditedJobs: facts.committed.length, creditedJobsInRange: facts.currentCommitted.length, completedJobs: facts.committed.length, jobsInRange: facts.currentCommitted.length, topTool: facts.topTool, toolKeys: [...new Set(facts.committed.map((row) => normalizeToolCode(row.toolCode, row.featureCode).key))], walletStatus: billing ? "initialized" : "missing", availableCredits: billing ? asNumber(billing.availableCredits) : null, heldCredits: billing ? asNumber(billing.heldCredits) : null, subscriptionStatus: billing?.subscriptionStatus || null, subscriptionPlan: billing?.subscriptionPlanCode || null, newsletter: newsletterProfile ? { id: newsletterProfile.id, status: newsletterProfile.status, tags: newsletterProfile.tags || [] } : null };
   });
   const unique = (values) => [...new Set(values.filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
   const facets = {
@@ -661,7 +673,7 @@ export async function productUsers(query = {}, newsletterByEmail = new Map()) {
     if (newsletter !== "all" && String(row.newsletter?.status || "not_subscribed") !== newsletter) return false;
     return true;
   });
-  const sorters = { recent: (a, b) => (asDate(b.lastLoginAt) || 0) - (asDate(a.lastLoginAt) || 0), joined: (a, b) => (asDate(b.joinedAt) || 0) - (asDate(a.joinedAt) || 0), jobs: (a, b) => b.completedJobs - a.completedJobs, credits: (a, b) => asNumber(a.availableCredits, -1) - asNumber(b.availableCredits, -1) };
+  const sorters = { recent: (a, b) => (asDate(b.lastActiveAt) || asDate(b.lastLoginAt) || 0) - (asDate(a.lastActiveAt) || asDate(a.lastLoginAt) || 0), joined: (a, b) => (asDate(b.joinedAt) || 0) - (asDate(a.joinedAt) || 0), jobs: (a, b) => b.completedJobs - a.completedJobs, credits: (a, b) => asNumber(a.availableCredits, -1) - asNumber(b.availableCredits, -1) };
   rows.sort(sorters[String(query.sort || "recent")] || sorters.recent);
   const { page, pageSize } = pageOptions(query); const total = rows.length; const offset = (page - 1) * pageSize;
   const segmentCounts = {}; for (const row of rows) for (const item of row.segments) segmentCounts[item] = (segmentCounts[item] || 0) + 1;
