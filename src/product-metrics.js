@@ -39,9 +39,30 @@ export function median(values) {
   return numbers.length % 2 ? numbers[middle] : (numbers[middle - 1] + numbers[middle]) / 2;
 }
 
+/**
+ * Plugin surfaces that are not tools.
+ *
+ * The plugin stamps a `tool` on every event, defaulting to the surface the user
+ * is currently on, so session, heartbeat and analytics-plumbing events all
+ * carry one of these. They are navigation chrome and a game, not products, and
+ * must never appear on the tools page or in tool totals.
+ */
+export const NON_TOOL_SURFACES = new Set([
+  "dashboard",
+  "collapsed-dashboard",
+  "profile",
+  "wayfall-game",
+  "liquid-glass",
+  "unattributed",
+  "unknown",
+]);
+
 export function normalizeToolCode(code, featureCode = null) {
   const raw = String(code || featureCode || "unattributed").trim().toLowerCase();
-  if (raw === "frame_gallery" || raw === "frames" || raw === "frames-to-pdf") {
+  // "frame-gallery" is the code the plugin emits; "frame_gallery" is what usage
+  // reservations record. Omitting the hyphenated form split one product into
+  // two dashboard rows and double counted its users and jobs.
+  if (raw === "frame_gallery" || raw === "frame-gallery" || raw === "frames" || raw === "frames-to-pdf") {
     return { key: "frames-to-pdf", label: "Frames to PDF", feature: featureCode || null };
   }
   if (raw === "unit_converter" || raw === "unit-converter") {
