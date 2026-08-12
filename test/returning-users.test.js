@@ -426,3 +426,42 @@ test("narrowing the range does not relabel a plugin-active user as dormant", asy
     assert.ok(!row.segments.includes("at_risk"), `not at risk at days=${days}`);
   }
 });
+
+test("signed-out visitors are measured by their pseudonymous id", async (t) => {
+  const client = await boot(t, "UTC");
+  const analytics = client.db("analytics");
+  const now = new Date();
+
+  // No user records at all — nobody here has an account. The plugin still
+  // gives each visitor a stable pseudonymous id, so their behaviour is
+  // measurable even though who they are is not.
+  const anon = (eventId, anonymousId, deviceId, dayOffset) => pluginEvent({
+    eventId, eventType: "tool_opened", deviceId,
+    eventAt: new Date(now.getTime() - dayOffset * DAY_MS),
+    user: { isAuthenticated: false, userId: null, email: null, anonymousId },
+  });
+
+  await analytics.collection("plugin_analytics_events").insertMany([
+    // A returning visitor: two distinct days under one pseudonymous id.
+    anon("a1", "figma_abc", "d1", 3),
+    anon("a2", "figma_abc", "d1", 1),
+    // A one-visit visitor.
+    anon("b1", "figma_xyz", "d2", 2),
+    // No anonymousId at all: falls back to the device so they still count once.
+    pluginEvent({
+      eventId: "c1", eventType: "tool_opened", deviceId: "d3",
+      eventAt: new Date(now.getTime() - DAY_MS),
+      user: { isAuthenticated: false, userId: null, email: null, anonymousId: null },
+    }),
+  ]);
+
+  const summary = await request(app)
+    .get("/api/operations/summary?days=30")
+    .set("Authorization", basicAuth)
+    .expect(200);
+
+  const metrics = summary.body.metrics;
+  assert.equal(metrics.anonymousVisitors.value, 3, "three distinct signed-out visitors");
+  assert.equal(metrics.returningAnonymousVisitors.value, 1, "one of them came back");
+  assert.equal(metrics.activeUsers.value, 0, "they are not counted as known accounts");
+});

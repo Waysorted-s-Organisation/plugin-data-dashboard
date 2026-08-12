@@ -100,6 +100,12 @@ async function pluginActivityDaysByIdentity(start, end) {
   const timezone = reportingTimezone();
   const byUserId = new Map();
   const byEmail = new Map();
+  // Signed-out visitors. They have no account and no email, but the plugin
+  // gives every session a stable pseudonymous id, so their behaviour is
+  // measurable even though who they are is not. Grouping only by userId/email
+  // discarded them entirely, leaving the platform's largest population
+  // unmeasured purely because it had no name attached.
+  const byAnonymous = new Map();
   let available = true;
   try {
     const collection = await getEventsCollection();
@@ -110,19 +116,29 @@ async function pluginActivityDaysByIdentity(start, end) {
           $group: {
             _id: {
               identity: { $ifNull: ["$user.userId", "$user.email"] },
+              // Falls back to the device so a signed-out visitor is still
+              // counted once even when an older event carries no pseudonymous id.
+              anonymous: { $ifNull: ["$user.anonymousId", "$deviceId"] },
               day: { $dateToString: { date: "$eventAt", format: "%Y-%m-%d", timezone } },
             },
           },
         },
-        { $group: { _id: "$_id.identity", days: { $addToSet: "$_id.day" } } },
+        {
+          $group: {
+            _id: { identity: "$_id.identity", anonymous: "$_id.anonymous" },
+            days: { $addToSet: "$_id.day" },
+          },
+        },
       ])
       .toArray();
 
     for (const row of rows) {
-      const identity = row._id;
-      if (!identity) continue;
-      const target = looksLikeEmail(identity) ? byEmail : byUserId;
-      const key = looksLikeEmail(identity) ? String(identity).toLowerCase() : String(identity);
+      const identity = row._id?.identity;
+      const anonymous = row._id?.anonymous;
+      const target = !identity ? byAnonymous : looksLikeEmail(identity) ? byEmail : byUserId;
+      const rawKey = identity || anonymous;
+      if (!rawKey) continue;
+      const key = looksLikeEmail(rawKey) ? String(rawKey).toLowerCase() : String(rawKey);
       const existing = target.get(key) || new Set();
       for (const day of row.days || []) existing.add(day);
       target.set(key, existing);
@@ -137,7 +153,7 @@ async function pluginActivityDaysByIdentity(start, end) {
   }
   // Built once here rather than per user: userFacts runs for every row in the
   // users table, and constructing an Intl.DateTimeFormat is not cheap.
-  return { byUserId, byEmail, timezone, available, formatDay: dayKeyFormatter(timezone) };
+  return { byUserId, byEmail, byAnonymous, timezone, available, formatDay: dayKeyFormatter(timezone) };
 }
 
 async function telemetryHealth(now = new Date()) {
@@ -243,8 +259,8 @@ function indexCore(core) {
     // userFacts reports on the CURRENT window, so it gets the current-window
     // index. The wide index is kept separately for cohort retention, which
     // measures each user against their own signup date rather than a window.
-    pluginActivity: core.pluginActivityCurrent || core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), timezone: "UTC", formatDay: dayKeyFormatter("UTC") },
-    pluginActivityLifetime: core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), timezone: "UTC", formatDay: dayKeyFormatter("UTC") },
+    pluginActivity: core.pluginActivityCurrent || core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") },
+    pluginActivityLifetime: core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") },
     billing: new Map(core.billings.map((row) => [id(row.user), row])),
     sessions: group(core.sessions), reservations: group(core.reservations), ledgers: group(core.ledgers),
     purchases: group(core.purchases), subscriptions: group(core.subscriptions), refunds: group(core.refunds), grants: group(core.starterGrants),
@@ -264,7 +280,7 @@ function userFacts(user, indexed, range) {
   // Active days combine backend logins with plugin activity, bucketed in the
   // configured reporting timezone. Using logins alone made returns from the
   // plugin — which reuses a stored token and creates no new session — invisible.
-  const activity = indexed.pluginActivity || { byUserId: new Map(), byEmail: new Map(), timezone: "UTC", formatDay: dayKeyFormatter("UTC") };
+  const activity = indexed.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") };
   const formatDay = activity.formatDay || dayKeyFormatter(activity.timezone);
   const distinctDays = new Set(currentSessions.map((row) => formatDay.format(loginAt(row))));
   // Both indexes must be merged, not chosen between: a user can have recent
@@ -345,7 +361,7 @@ function periodSummary(core, start, end, activityIndex = null) {
   // Active days per user, from logins and plugin activity alike, bucketed in
   // the reporting timezone. Counting logins only made plugin-only returns
   // invisible, which is why the dashboard reported no returning users.
-  const activity = activityIndex || core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), timezone: "UTC", formatDay: dayKeyFormatter("UTC") };
+  const activity = activityIndex || core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") };
   const formatDay = activity.formatDay || dayKeyFormatter(activity.timezone);
   const daysByUser = new Map();
   const addDay = (key, day) => {
@@ -381,6 +397,12 @@ function periodSummary(core, start, end, activityIndex = null) {
   // from a login or from using the plugin. Anonymous plugin visitors are
   // deliberately excluded here because this metric counts known users.
   const activeUsers = daysByUser.size;
+  // Signed-out visitors, counted by pseudonymous id. Reported separately rather
+  // than folded into activeUsers: that metric means "known accounts", and
+  // merging the two would make neither number answerable.
+  const anonymousDayCounts = [...(activity.byAnonymous ? activity.byAnonymous.values() : [])];
+  const anonymousVisitors = anonymousDayCounts.length;
+  const returningAnonymousVisitors = anonymousDayCounts.filter((days) => days.size >= 2).length;
   const firstCommitByUser = new Map();
   for (const row of core.reservations.filter((item) => item.status === "committed" && !compensated.has(id(item._id)))) {
     const key = id(row.user); const occurredAt = reservationAt(row);
@@ -394,6 +416,8 @@ function periodSummary(core, start, end, activityIndex = null) {
     activeUsers,
     activatedUsers: activated,
     returningUsers: [...daysByUser.values()].filter((days) => days.size >= 2).length,
+    anonymousVisitors,
+    returningAnonymousVisitors,
     completedJobs: reservations.length,
     creditsConsumed: reservations.reduce((sum, row) => sum + asNumber(row.creditsReserved), 0),
     grossRevenuePaise: captured.reduce((sum, row) => sum + asNumber(row.amountPaise), 0),
