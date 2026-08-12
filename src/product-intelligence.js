@@ -417,8 +417,20 @@ function userFacts(user, indexed, range) {
   const ageSinceLogin = lastActivityDate ? Math.max(0, Math.floor((range.now - lastActivityDate) / DAY_MS)) : null;
   const segments = [];
   if (inRange(user.createdAt, range.currentStart, range.now)) segments.push("new");
-  if (!firstCommitted) segments.push("not_activated");
-  if (firstCommitted) segments.push("activated");
+  // Activation means the person used a tool, whether or not it charged them.
+  // Keying it on credited work alone reported anyone who only used credit-free
+  // tools as never activated — and most tools do real work without charging.
+  // A tool that charges nothing produces no reservation, so it can never win
+  // the credited ranking above. Falling back to observed activity means the
+  // column shows what the person actually used rather than implying they used
+  // nothing. The `credited` flag lets the UI say which kind of evidence it is.
+  const observedTopTool =
+    indexed.pluginTopTools?.byUserId.get(userId) ||
+    indexed.pluginTopTools?.byEmail.get(String(user.email || "").toLowerCase()) ||
+    null;
+  const activated = Boolean(firstCommitted || observedTopTool);
+  if (!activated) segments.push("not_activated");
+  if (activated) segments.push("activated");
   if (currentCommitted.length >= 3) segments.push("engaged");
   if (distinctDays.size >= 2) segments.push("returning");
   if (billing && asNumber(billing.availableCredits) <= lowCreditThreshold()) segments.push("low_credit");
@@ -443,18 +455,10 @@ function userFacts(user, indexed, range) {
     tools.set(tool.key, current);
   }
   const creditedTopTool = [...tools.values()].sort((a, b) => b.completed - a.completed || b.credits - a.credits)[0] || null;
-  // A tool that charges nothing produces no reservation, so it can never win
-  // the credited ranking above. Falling back to observed activity means the
-  // column shows what the person actually used rather than implying they used
-  // nothing. The `credited` flag lets the UI say which kind of evidence it is.
-  const observedTopTool =
-    indexed.pluginTopTools?.byUserId.get(userId) ||
-    indexed.pluginTopTools?.byEmail.get(String(user.email || "").toLowerCase()) ||
-    null;
   const topTool = creditedTopTool
     ? { ...creditedTopTool, credited: true }
     : observedTopTool;
-  return { userId, billing, sessions, reservations, committed, purchases, captured, currentSessions, currentCommitted, distinctDays, pluginActiveDays, activityAvailable, lastLogin, lastLoginDate, firstCommitted, segments, topTool };
+  return { userId, billing, sessions, reservations, committed, purchases, captured, currentSessions, currentCommitted, distinctDays, pluginActiveDays, activityAvailable, activated, lastLogin, lastLoginDate, firstCommitted, segments, topTool };
 }
 
 /**
@@ -485,7 +489,7 @@ function resolveLifecycleStage(facts, billing) {
   const hasPurchasedCredits = asNumber(billing?.lifetimePurchasedCredits) > 0;
   if (facts.captured.length || hasPaidSubscription || hasPurchasedCredits) return "customer";
   if (facts.activityAvailable && facts.distinctDays.size >= 2) return "returning";
-  if (facts.firstCommitted) return "activated";
+  if (facts.activated) return "activated";
   // Reached checkout but no money is confirmed. Distinct from a user who never
   // tried, which is the distinction that matters when triaging a failed payment.
   const startedCheckout =
@@ -919,9 +923,16 @@ export async function productToolDetail(toolCode, days = 30) {
 export async function productLifecycle(days = 90) {
   const range = period(days); const core = await loadCore(range); const indexed = indexCore(core); const cohort = core.users.filter((row) => inRange(row.createdAt, range.currentStart, range.now));
   const facts = cohort.map((user) => ({ user, facts: userFacts(user, indexed, range) }));
-  const loggedIn = facts.filter((row) => row.facts.sessions.length); const activated = facts.filter((row) => row.facts.firstCommitted); const returned = facts.filter((row) => row.facts.distinctDays.size >= 2); const purchased = facts.filter((row) => resolveLifecycleStage(row.facts, row.facts.billing) === "customer");
-  const stages = [{ key: "signed_up", label: "Signed up", users: cohort.length }, { key: "logged_in", label: "Successful login", users: loggedIn.length }, { key: "activated", label: "Credited tool activation", users: activated.length }, { key: "returned", label: "Returned another day", users: returned.length }, { key: "purchased", label: "Confirmed purchase", users: purchased.length }].map((stage, index, all) => ({ ...stage, conversionFromPrevious: index ? percent(stage.users, all[index - 1].users) : 100 }));
-  const loginTimes = loggedIn.map(({ user, facts: item }) => loginAt(item.sessions[0]) - asDate(user.createdAt)); const activationTimes = activated.map(({ user, facts: item }) => reservationAt(item.firstCommitted) - asDate(user.createdAt));
+  const loggedIn = facts.filter((row) => row.facts.sessions.length); const activated = facts.filter((row) => row.facts.activated); const returned = facts.filter((row) => row.facts.distinctDays.size >= 2); const purchased = facts.filter((row) => resolveLifecycleStage(row.facts, row.facts.billing) === "customer");
+  const stages = [{ key: "signed_up", label: "Signed up", users: cohort.length }, { key: "logged_in", label: "Successful login", users: loggedIn.length }, { key: "activated", label: "Used a tool", users: activated.length }, { key: "returned", label: "Returned another day", users: returned.length }, { key: "purchased", label: "Confirmed purchase", users: purchased.length }].map((stage, index, all) => ({ ...stage, conversionFromPrevious: index ? percent(stage.users, all[index - 1].users) : 100 }));
+  const loginTimes = loggedIn.map(({ user, facts: item }) => loginAt(item.sessions[0]) - asDate(user.createdAt)); const activationTimes = activated
+    // Activation no longer requires a credited reservation, so a user can be
+    // activated with firstCommitted null. Time-to-activation is only meaningful
+    // where a timestamped first use exists; telemetry activation is known to
+    // the day, not the instant, so those users are excluded from the median
+    // rather than given a fabricated time.
+    .filter(({ facts: item }) => item.firstCommitted)
+    .map(({ user, facts: item }) => reservationAt(item.firstCommitted) - asDate(user.createdAt));
   const weeks = new Map();
   for (const { user, facts: item } of facts) {
     const created = asDate(user.createdAt); const monday = new Date(Date.UTC(created.getUTCFullYear(), created.getUTCMonth(), created.getUTCDate() - ((created.getUTCDay() + 6) % 7))); const key = monday.toISOString().slice(0, 10); const row = weeks.get(key) || { week: key, signedUp: 0, loggedIn: 0, activated: 0, returned7d: 0, returned30d: 0, latestSignupAt: created };
@@ -951,7 +962,7 @@ export async function productLifecycle(days = 90) {
       .filter((offset) => Number.isFinite(offset) && offset >= 1);
     row.returned7d += Number(daysAfterSignup.some((offset) => offset <= 7)); row.returned30d += Number(daysAfterSignup.some((offset) => offset <= 30)); weeks.set(key, row);
   }
-  return { asOf: range.now, coverage: "Activation covers credited tool completions only.", stages, timing: { medianTimeToLoginMs: median(loginTimes), medianTimeToActivationMs: median(activationTimes) }, stuck: { signedUpNotLoggedIn: cohort.length - loggedIn.length, loggedInNotActivated: loggedIn.filter((row) => !row.facts.firstCommitted).length, activatedNotReturned: activated.filter((row) => row.facts.distinctDays.size < 2).length }, cohorts: [...weeks.values()].sort((a, b) => a.week.localeCompare(b.week)).map((row) => ({ week: row.week, signedUp: row.signedUp, loggedIn: row.loggedIn, activated: row.activated, returned7d: row.returned7d, returned30d: row.returned30d, activationRate: percent(row.activated, row.signedUp), return7dRate: range.now - row.latestSignupAt >= 7 * DAY_MS ? percent(row.returned7d, row.signedUp) : null, return30dRate: range.now - row.latestSignupAt >= 30 * DAY_MS ? percent(row.returned30d, row.signedUp) : null })) };
+  return { asOf: range.now, coverage: "Activation counts any tool use, whether or not it charged credits.", stages, timing: { medianTimeToLoginMs: median(loginTimes), medianTimeToActivationMs: median(activationTimes) }, stuck: { signedUpNotLoggedIn: cohort.length - loggedIn.length, loggedInNotActivated: loggedIn.filter((row) => !row.facts.activated).length, activatedNotReturned: activated.filter((row) => row.facts.distinctDays.size < 2).length }, cohorts: [...weeks.values()].sort((a, b) => a.week.localeCompare(b.week)).map((row) => ({ week: row.week, signedUp: row.signedUp, loggedIn: row.loggedIn, activated: row.activated, returned7d: row.returned7d, returned30d: row.returned30d, activationRate: percent(row.activated, row.signedUp), return7dRate: range.now - row.latestSignupAt >= 7 * DAY_MS ? percent(row.returned7d, row.signedUp) : null, return30dRate: range.now - row.latestSignupAt >= 30 * DAY_MS ? percent(row.returned30d, row.signedUp) : null })) };
 }
 
 export async function productCommercial(days = 30) {

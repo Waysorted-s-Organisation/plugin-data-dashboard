@@ -345,3 +345,74 @@ test("top tool shows a credit-free tool the user actually used", async (t) => {
   const idle = users.body.items.find((r) => r.email === "idle@example.com");
   assert.equal(idle.topTool, null, "genuine inactivity stays empty");
 });
+
+test("using a credit-free tool activates a user and forms their journey", async (t) => {
+  const mongod = await MongoMemoryServer.create();
+  t.after(async () => { await closeDb(); await mongod.stop(); });
+  process.env.MONGODB_URI = mongod.getUri("analytics");
+  process.env.MONGODB_DB = "analytics";
+  process.env.BACKEND_MONGODB_URI = mongod.getUri("waysorted");
+  process.env.BACKEND_MONGODB_DB = "waysorted";
+  process.env.DASHBOARD_BASIC_AUTH_USER = "test";
+  process.env.DASHBOARD_BASIC_AUTH_PASS = "test";
+
+  const client = new MongoClient(mongod.getUri());
+  await client.connect();
+  t.after(() => client.close());
+  const now = new Date();
+  const DAY = 24 * 60 * 60 * 1000;
+  const free = new ObjectId();
+  const never = new ObjectId();
+
+  await client.db("waysorted").collection("users").insertMany([
+    { _id: free, email: "freeuser@example.com", createdAt: new Date(now.getTime() - 10 * DAY) },
+    { _id: never, email: "neveruser@example.com", createdAt: new Date(now.getTime() - 10 * DAY) },
+  ]);
+  await client.db("waysorted").collection("sessions").insertMany([
+    { user: free, source: "figma", completed: true, completedAt: new Date(now.getTime() - 9 * DAY), createdAt: new Date(now.getTime() - 9 * DAY) },
+    { user: never, source: "figma", completed: true, completedAt: new Date(now.getTime() - 9 * DAY), createdAt: new Date(now.getTime() - 9 * DAY) },
+  ]);
+
+  // Real work in tools that charge nothing, on two separate days. No
+  // reservation is ever created for these — telemetry is the only evidence.
+  await client.db("analytics").collection("plugin_analytics_events").insertMany([
+    ...[
+      ["cs1", "comment-summarizer", 4],
+      ["cs2", "comment-summarizer", 4],
+      ["il1", "icon-library", 2],
+    ].map(([eventId, tool, dayOffset]) => ({
+      eventId, schemaVersion: 2, isSemantic: true, eventType: "tool_action_completed",
+      sessionId: `s-${eventId}`, deviceId: "d1", source: "main", tool,
+      eventAt: new Date(now.getTime() - dayOffset * DAY), receivedAt: now, payload: {},
+      user: { isAuthenticated: true, userId: String(free), email: null, anonymousId: null },
+    })),
+  ]);
+
+  const users = await request(app)
+    .get("/api/operations/users?days=30")
+    .set("Authorization", basicAuth)
+    .expect(200);
+
+  const freeRow = users.body.items.find((r) => r.email === "freeuser@example.com");
+  assert.ok(freeRow.segments.includes("activated"), "credit-free tool use is activation");
+  assert.ok(!freeRow.segments.includes("not_activated"));
+  assert.equal(freeRow.creditedJobs, 0, "and it billed nothing");
+  assert.equal(freeRow.topTool.label, "Comment Summarizer");
+  assert.equal(freeRow.topTool.credited, false);
+  assert.ok(freeRow.segments.includes("returning"), "two distinct days is a return");
+
+  const neverRow = users.body.items.find((r) => r.email === "neveruser@example.com");
+  assert.ok(neverRow.segments.includes("not_activated"), "no tool use of any kind is still inactive");
+
+  // The journey must agree with the table.
+  const lifecycle = await request(app)
+    .get("/api/operations/lifecycle?days=90")
+    .set("Authorization", basicAuth)
+    .expect(200);
+  const stage = (key) => lifecycle.body.stages.find((row) => row.key === key).users;
+  assert.equal(stage("signed_up"), 2);
+  assert.equal(stage("logged_in"), 2);
+  assert.equal(stage("activated"), 1, "the credit-free user activated");
+  assert.equal(stage("returned"), 1, "and returned");
+  assert.equal(lifecycle.body.stuck.loggedInNotActivated, 1, "only the genuinely idle user is stuck");
+});
