@@ -984,16 +984,6 @@ export async function productDataHealth(newsletterConfigured = false) {
   const telemetry = await telemetryHealth(new Date());
   telemetry.ageHours = telemetry.latestAt ? Math.round(((Date.now() - telemetry.latestAt) / 36e5) * 10) / 10 : null;
   const completedSessions = core.sessions.filter(successfulSession).length; const incompleteLinkedSessions = core.sessions.filter((row) => row.user && !successfulSession(row)).length; const terminal = core.reservations.filter(terminalReservation); const attributed = terminal.filter((row) => row.toolCode || row.featureCode).length;
-  // Money may have moved without anything being delivered. A purchase sits at
-  // created/pending from checkout initiation until the provider confirms it, so
-  // one that is still pending an hour later is either an abandoned checkout or
-  // a payment that settled and never got recorded — and the two are
-  // indistinguishable here, which is exactly why it needs surfacing rather than
-  // silently ageing.
-  const stalledCheckouts = core.purchases.filter(
-    (row) => ["created", "pending"].includes(row.status) &&
-      range.now - asDate(row.createdAt) > 60 * 60 * 1000
-  );
   const capturedPurchaseIds = new Set(core.purchases.filter((row) => row.status === "captured").map((row) => id(row._id)));
   const processedRefunds = core.refunds.filter((row) => row.status === "processed");
   const unmatchedProcessedRefunds = processedRefunds.filter((row) => !capturedPurchaseIds.has(id(row.purchase))).length;
