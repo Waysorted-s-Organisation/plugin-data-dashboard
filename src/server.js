@@ -32,6 +32,7 @@ import {
   productTools,
   productUserDetail,
   productUsers,
+  NON_PERSISTED_EVENT_TYPES,
   SEMANTIC_EVENT_TYPES,
 } from "./product-intelligence.js";
 
@@ -41,6 +42,24 @@ import {
  * the curated set and the complete record.
  */
 const SEMANTIC_EVENT_TYPE_SET = new Set(SEMANTIC_EVENT_TYPES);
+const NON_PERSISTED_EVENT_TYPE_SET = new Set(NON_PERSISTED_EVENT_TYPES);
+
+/**
+ * Whether repetitive, information-free traffic (heartbeats, transport config
+ * changes) is persisted.
+ *
+ * Defaults to false, matching the documented contract: these are excluded from
+ * every metric anyway, so storing a heartbeat every 30 seconds per open plugin
+ * only grows the collection. Set to true temporarily when debugging a plugin
+ * build, where the heartbeat's queue depth and uptime are the useful signal.
+ *
+ * This is deliberately narrower than PASSIVE_EVENT_TYPES: events such as
+ * backend_operation and user_context_changed do not count as user activity but
+ * are still evidence of what happened, so they are always stored.
+ */
+function storePassiveEvents() {
+  return String(process.env.ANALYTICS_STORE_PASSIVE_EVENTS || "").trim().toLowerCase() === "true";
+}
 
 dotenv.config();
 
@@ -285,8 +304,28 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
         plugin: envelope.plugin,
       };
     });
-    const result = await (await getEventsCollection()).bulkWrite(documents.map((document) => ({ updateOne: { filter: { eventId: document.eventId }, update: { $setOnInsert: document }, upsert: true } })), { ordered: false });
-    return res.status(202).json({ accepted: documents.length, inserted: result.upsertedCount, duplicates: documents.length - result.upsertedCount });
+    // Passive events are dropped before the write unless explicitly enabled.
+    // They are excluded from every metric regardless, so persisting them only
+    // grows the collection — but the counts are still reported so a plugin
+    // build emitting nothing but noise is visible without storing the noise.
+    const keepPassive = storePassiveEvents();
+    const stored = keepPassive
+      ? documents
+      : documents.filter((document) => !NON_PERSISTED_EVENT_TYPE_SET.has(document.eventType));
+    const dropped = documents.length - stored.length;
+    const dropReasons = dropped ? { non_persisted_event_type: dropped } : {};
+
+    const result = stored.length
+      ? await (await getEventsCollection()).bulkWrite(stored.map((document) => ({ updateOne: { filter: { eventId: document.eventId }, update: { $setOnInsert: document }, upsert: true } })), { ordered: false })
+      : { upsertedCount: 0 };
+    return res.status(202).json({
+      accepted: documents.length,
+      stored: stored.length,
+      inserted: result.upsertedCount,
+      duplicates: stored.length - result.upsertedCount,
+      dropped,
+      dropReasons,
+    });
   } catch (error) {
     console.error("Analytics ingest failed:", error?.message || error);
     return res.status(500).json({ error: "Failed to ingest analytics events" });

@@ -81,11 +81,30 @@ test("previously discarded event types now survive ingest and are stored", async
     .send(pluginEnvelope(recovered))
     .expect(202);
 
-  assert.equal(response.body.accepted, 6);
-  assert.equal(response.body.inserted, 6);
+  assert.equal(response.body.accepted, 6, "all six arrived");
+  // session_heartbeat is repetitive, information-free traffic and is not
+  // persisted unless ANALYTICS_STORE_PASSIVE_EVENTS is on. Everything else —
+  // including backend_operation and user_context_changed, which are passive for
+  // metrics but are still evidence of what happened — is kept.
+  assert.equal(response.body.dropped, 1, "only the heartbeat is dropped");
+  assert.deepEqual(response.body.dropReasons, { non_persisted_event_type: 1 });
+  assert.equal(response.body.stored, 5);
+  assert.equal(response.body.inserted, 5);
 
   const stored = await (await getEventsCollection()).find({}).toArray();
-  assert.equal(stored.length, 6, "all six events are persisted, none filtered server-side");
+  assert.equal(stored.length, 5, "five events persisted");
+  assert.ok(
+    !stored.some((row) => row.eventType === "session_heartbeat"),
+    "the heartbeat is not stored"
+  );
+  assert.ok(
+    stored.some((row) => row.eventType === "backend_operation"),
+    "a backend failure is still recorded even though it is not user activity"
+  );
+  assert.ok(
+    stored.some((row) => row.eventType === "user_context_changed"),
+    "a sign-in transition is still recorded"
+  );
 
   const byId = new Map(stored.map((row) => [row.eventId, row]));
   assert.equal(byId.get("e-backend").isSemantic, false, "non-semantic events are stored and flagged");
@@ -185,4 +204,26 @@ test("a non-credit tool becomes visible on the dashboard after ingest", async (t
   assert.equal(row.creditsConsumed, 0);
   assert.equal(tools.body.summary.telemetryOnlyTools, 1);
   assert.equal(tools.body.summary.observedToolEvents, 6);
+});
+
+test("enabling ANALYTICS_STORE_PASSIVE_EVENTS persists heartbeats for debugging", async (t) => {
+  await bootMongo(t);
+  process.env.ANALYTICS_STORE_PASSIVE_EVENTS = "true";
+  t.after(() => { delete process.env.ANALYTICS_STORE_PASSIVE_EVENTS; });
+
+  const response = await request(app)
+    .post("/api/plugin-analytics/ingest")
+    .send(pluginEnvelope([
+      evt("hb-on", "session_heartbeat", { isSemantic: false, payload: { uptimeMs: 30000, queueDepth: 4 } }),
+      evt("open-on", "tool_opened"),
+    ]))
+    .expect(202);
+
+  assert.equal(response.body.dropped, 0, "nothing is dropped while debugging");
+  assert.equal(response.body.stored, 2);
+  const stored = await (await getEventsCollection()).find({}).toArray();
+  assert.equal(stored.length, 2);
+  const heartbeat = stored.find((row) => row.eventType === "session_heartbeat");
+  assert.ok(heartbeat, "the heartbeat is persisted");
+  assert.equal(heartbeat.payload.queueDepth, 4, "its diagnostic payload survives intact");
 });

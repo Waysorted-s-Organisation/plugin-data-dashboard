@@ -156,7 +156,15 @@ test("credits-first operations APIs", async (t) => {
     assert.equal(profile.status, 200);
     assert.equal(profile.body.reservations.find((row) => row.rawToolCode === "frame_gallery").label, "Frames to PDF");
     assert.equal(profile.body.feedback.find((row) => row.source === "current").score, 5);
-    assert.equal(profile.body.feedback.find((row) => row.source === "legacy").scale, 10);
+    // Legacy feedback is stored on a 10-point scale. The profile normalises it
+    // to 5 so it agrees with the feedback page and with current-scale reviews;
+    // the original scale and value are preserved alongside. A seeded 10/10
+    // must therefore surface as 5/5, not as the "10/5" the UI used to print.
+    const legacyFeedback = profile.body.feedback.find((row) => row.source === "legacy");
+    assert.equal(legacyFeedback.scale, 5, "normalised to the 5-point reporting scale");
+    assert.equal(legacyFeedback.score, 5, "a legacy 10/10 is a 5/5");
+    assert.equal(legacyFeedback.sourceScale, 10, "the original scale is retained");
+    assert.equal(legacyFeedback.rawScore, 10, "the original value is retained");
     const byTool = await request(app).get("/api/operations/users?tool=frames-to-pdf&pageSize=25").set("Authorization", basicAuth);
     assert.equal(byTool.body.items.length, 1);
     assert.equal(byTool.body.items[0].email, "alice@example.com");
