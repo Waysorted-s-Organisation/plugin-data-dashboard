@@ -380,6 +380,37 @@ function userFacts(user, indexed, range) {
  *   on different clocks and corrupted the previous-period baseline that every
  *   "what changed" percentage is measured against.
  */
+/**
+ * Where a user sits in the lifecycle.
+ *
+ * Commercial standing is deliberately NOT read from Purchase.status alone. A
+ * subscription Purchase is written as "pending" at checkout initiation and, due
+ * to a defect in the billing app, never advances to "captured" — so a paying
+ * subscriber was rendered byte-for-byte identically to someone who had never
+ * opened a checkout, and was excluded from every stage-based filter and count.
+ * The wallet's own subscription state and lifetime purchased credits are
+ * already loaded here and are authoritative about whether money changed hands.
+ *
+ * "pending" means checkout was STARTED, not paid, so it earns its own rung
+ * rather than being promoted to customer.
+ */
+function resolveLifecycleStage(facts, billing) {
+  const subscriptionStatus = String(billing?.subscriptionStatus || "");
+  const hasPaidSubscription = ["active", "cancel_scheduled"].includes(subscriptionStatus);
+  const hasPurchasedCredits = asNumber(billing?.lifetimePurchasedCredits) > 0;
+  if (facts.captured.length || hasPaidSubscription || hasPurchasedCredits) return "customer";
+  if (facts.activityAvailable && facts.distinctDays.size >= 2) return "returning";
+  if (facts.firstCommitted) return "activated";
+  // Reached checkout but no money is confirmed. Distinct from a user who never
+  // tried, which is the distinction that matters when triaging a failed payment.
+  const startedCheckout =
+    subscriptionStatus === "payment_pending" ||
+    facts.purchases.some((row) => ["created", "pending"].includes(row.status));
+  if (startedCheckout) return "checkout_started";
+  if (facts.lastLogin) return "logged_in";
+  return "signed_up";
+}
+
 function periodSummary(core, start, end, activityIndex = null) {
   const sessions = core.sessions.filter(successfulSession).filter((row) => inRange(loginAt(row), start, end));
   const compensated = new Set(core.ledgers.filter((row) => row.reason === "compensation_credit").map((row) => id(row.reservation)).filter(Boolean));
@@ -464,6 +495,16 @@ export async function productSummary(days = 30) {
   const expired = core.reservations.filter((row) => row.status === "expired" && inRange(row.updatedAt || row.expiresAt, range.currentStart, range.now)).length;
   const pendingPayments = core.purchases.filter((row) => ["pending", "failed"].includes(row.status)).length;
   const unattributed = core.reservations.filter((row) => terminalReservation(row) && !row.toolCode && !row.featureCode).length;
+  // Money may have moved without anything being delivered. A purchase sits at
+  // created/pending from checkout initiation until the provider confirms it, so
+  // one that is still pending an hour later is either an abandoned checkout or
+  // a payment that settled and never got recorded — and the two are
+  // indistinguishable here, which is exactly why it needs surfacing rather than
+  // silently ageing.
+  const stalledCheckouts = core.purchases.filter(
+    (row) => ["created", "pending"].includes(row.status) &&
+      range.now - asDate(row.createdAt) > 60 * 60 * 1000
+  );
   const capturedPurchaseIds = new Set(core.purchases.filter((row) => row.status === "captured").map((row) => id(row._id)));
   const unmatchedRefunds = core.refunds.filter((row) => row.status === "processed" && !capturedPurchaseIds.has(id(row.purchase))).length;
   const telemetry = await telemetryHealth(range.now);
@@ -472,6 +513,7 @@ export async function productSummary(days = 30) {
     expired ? { severity: "warning", title: `${expired} tool jobs expired`, detail: "Review the affected tools and processing flow.", href: "/tools.html?status=expired" } : null,
     pendingPayments ? { severity: "warning", title: `${pendingPayments} payment attempts need context`, detail: "Pending and failed attempts are not counted as revenue.", href: "/credits.html" } : null,
     unattributed ? { severity: "info", title: `${unattributed} terminal jobs are unattributed`, detail: "They remain visible but are not assigned to a product tool.", href: "/data-health.html" } : null,
+    stalledCheckouts.length ? { severity: "critical", title: `${stalledCheckouts.length} checkouts have not settled`, detail: "Started over an hour ago and still not captured. If money left the customer's account, they have paid and received nothing.", href: "/credits.html" } : null,
     unmatchedRefunds ? { severity: "warning", title: `${unmatchedRefunds} processed refunds lack a captured purchase match`, detail: "They are excluded from current revenue until the commercial records are reconciled.", href: "/data-health.html" } : null,
     telemetry.status !== "healthy" ? { severity: "critical", title: "Non-credit behavior tracking is stale", detail: telemetry.message, href: "/data-health.html" } : null,
   ].filter(Boolean);
@@ -489,7 +531,7 @@ export async function productUsers(query = {}, newsletterByEmail = new Map()) {
     const latestSource = facts.lastLogin?.source || null;
     const latestCountry = facts.lastLogin?.countryCode || billing?.pricingCountry || null;
     const newsletterProfile = newsletterByEmail.get(String(user.email || "").toLowerCase()) || null;
-    return { id: facts.userId, name: user.name || null, email: user.email || null, picture: user.picture || null, joinedAt: user.createdAt || null, segments: facts.segments, lifecycleStage: facts.captured.length ? "customer" : (facts.activityAvailable && facts.distinctDays.size >= 2) ? "returning" : facts.firstCommitted ? "activated" : facts.lastLogin ? "logged_in" : "signed_up", lastLoginAt: facts.lastLoginDate, latestLoginSource: latestSource, country: latestCountry, successfulLogins: facts.sessions.length, pluginActiveDays: facts.activityAvailable ? facts.pluginActiveDays : null, activeDaysInRange: facts.activityAvailable ? facts.distinctDays.size : null, pluginActivityAvailable: facts.activityAvailable, completedJobs: facts.committed.length, jobsInRange: facts.currentCommitted.length, topTool: facts.topTool, toolKeys: [...new Set(facts.committed.map((row) => normalizeToolCode(row.toolCode, row.featureCode).key))], walletStatus: billing ? "initialized" : "missing", availableCredits: billing ? asNumber(billing.availableCredits) : null, heldCredits: billing ? asNumber(billing.heldCredits) : null, subscriptionStatus: billing?.subscriptionStatus || null, subscriptionPlan: billing?.subscriptionPlanCode || null, newsletter: newsletterProfile ? { id: newsletterProfile.id, status: newsletterProfile.status, tags: newsletterProfile.tags || [] } : null };
+    return { id: facts.userId, name: user.name || null, email: user.email || null, picture: user.picture || null, joinedAt: user.createdAt || null, segments: facts.segments, lifecycleStage: resolveLifecycleStage(facts, billing), lastLoginAt: facts.lastLoginDate, latestLoginSource: latestSource, country: latestCountry, successfulLogins: facts.sessions.length, pluginActiveDays: facts.activityAvailable ? facts.pluginActiveDays : null, activeDaysInRange: facts.activityAvailable ? facts.distinctDays.size : null, pluginActivityAvailable: facts.activityAvailable, creditedJobs: facts.committed.length, creditedJobsInRange: facts.currentCommitted.length, completedJobs: facts.committed.length, jobsInRange: facts.currentCommitted.length, topTool: facts.topTool, toolKeys: [...new Set(facts.committed.map((row) => normalizeToolCode(row.toolCode, row.featureCode).key))], walletStatus: billing ? "initialized" : "missing", availableCredits: billing ? asNumber(billing.availableCredits) : null, heldCredits: billing ? asNumber(billing.heldCredits) : null, subscriptionStatus: billing?.subscriptionStatus || null, subscriptionPlan: billing?.subscriptionPlanCode || null, newsletter: newsletterProfile ? { id: newsletterProfile.id, status: newsletterProfile.status, tags: newsletterProfile.tags || [] } : null };
   });
   const unique = (values) => [...new Set(values.filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
   const facets = {
@@ -531,7 +573,7 @@ export async function productUserDetail(userId) {
     (await getBackendFeatureRequestsCollection()).find({ authorId: String(userId), isDeleted: { $ne: true } }, { projection: { title: 1, status: 1, board: 1, votes: 1, commentsCount: 1, createdAt: 1 } }).sort({ createdAt: -1 }).limit(30).toArray(),
   ]);
   const safePurchase = (row) => ({ id: id(row._id), kind: row.kind, productCode: row.productCode, status: row.status, amount: asNumber(row.amountPaise), currency: row.currency || "INR", createdAt: row.createdAt });
-  return { asOf: range.now, user: { id: facts.userId, name: user.name || null, email: user.email || null, picture: user.picture || null, joinedAt: user.createdAt, favorites: user.favorites || [], segments: facts.segments, lifecycleStage: facts.captured.length ? "customer" : (facts.activityAvailable && facts.distinctDays.size >= 2) ? "returning" : facts.firstCommitted ? "activated" : facts.lastLogin ? "logged_in" : "signed_up" }, billing: billing ? { availableCredits: asNumber(billing.availableCredits), heldCredits: asNumber(billing.heldCredits), lifetimeSpentCredits: asNumber(billing.lifetimeSpentCredits), lifetimePurchasedCredits: asNumber(billing.lifetimePurchasedCredits), lifetimeBonusCredits: asNumber(billing.lifetimeBonusCredits), subscriptionStatus: billing.subscriptionStatus, subscriptionPlan: billing.subscriptionPlanCode, pricingTier: billing.pricingTier, pricingCountry: billing.pricingCountry } : null, sessions: facts.sessions.slice(-50).reverse().map((row) => ({ source: row.source || "unknown", country: row.countryCode || null, completedAt: loginAt(row) })), reservations: facts.reservations.slice(-100).reverse().map((row) => ({ id: id(row._id), ...normalizeToolCode(row.toolCode, row.featureCode), rawToolCode: row.toolCode || null, featureCode: row.featureCode || null, status: indexed.compensatedReservations.has(id(row._id)) ? "compensated" : row.status, credits: asNumber(row.creditsReserved), processor: row.processor || null, occurredAt: reservationAt(row), durationMs: row.status === "committed" && row.committedAt && row.createdAt ? asDate(row.committedAt) - asDate(row.createdAt) : null })), ledger: (indexed.ledgers.get(facts.userId) || []).slice().sort((a, b) => asDate(b.createdAt) - asDate(a.createdAt)).slice(0, 100).map((row) => ({ reason: row.reason, deltaCredits: asNumber(row.deltaCredits), tool: normalizeToolCode(row.toolCode, row.featureCode), createdAt: row.createdAt })), purchases: facts.purchases.map(safePurchase), subscriptions: (indexed.subscriptions.get(facts.userId) || []).map((row) => ({ planCode: row.planCode, status: row.status, currentPeriodStart: row.currentPeriodStart, currentPeriodEnd: row.currentPeriodEnd, nextChargeAt: row.nextChargeAt })), refunds: (indexed.refunds.get(facts.userId) || []).map((row) => ({ status: row.status, amountPaise: asNumber(row.amountPaise), reason: row.reason || null, createdAt: row.createdAt })), feedback: [...legacyFeedback.map((row) => ({ source: "legacy", rawScore: row.score ?? null, score: row.score === null || row.score === undefined ? null : Math.round((asNumber(row.score) / 10 * 5) * 10) / 10, scale: 5, sourceScale: 10, type: row.feedbackType || null, tool: row.toolId || null, createdAt: row.createdAt })), ...feedback.map((row) => ({ source: "current", rawScore: row.rating ?? null, score: row.rating ?? null, rating: row.rating ?? null, scale: 5, sourceScale: 5, comment: row.isAnonymous ? null : row.comment || null, path: row.path || null, createdAt: row.createdAt }))].sort((a, b) => asDate(b.createdAt) - asDate(a.createdAt)), featureRequests: requests.map((row) => ({ title: row.title, status: row.status, board: row.board, votes: asNumber(row.votes), comments: asNumber(row.commentsCount), createdAt: row.createdAt })), coverage: { nonCreditToolActivity: !facts.activityAvailable ? "unavailable" : facts.pluginActiveDays > 0 ? "measured" : "no_activity_recorded", pluginActiveDays: facts.activityAvailable ? facts.pluginActiveDays : null, activeDaysInRange: facts.activityAvailable ? facts.distinctDays.size : null, message: !facts.activityAvailable ? "Plugin activity could not be read, so this profile shows logins and credited tool activity only. This is a read failure, not an absence of activity." : facts.pluginActiveDays > 0 ? "Includes successful logins, credited tool activity, and plugin activity for tools that do not consume credits." : "Includes successful logins and credited tool activity. No plugin activity has been recorded for this user in the selected period." } };
+  return { asOf: range.now, user: { id: facts.userId, name: user.name || null, email: user.email || null, picture: user.picture || null, joinedAt: user.createdAt, favorites: user.favorites || [], segments: facts.segments, lifecycleStage: resolveLifecycleStage(facts, billing) }, billing: billing ? { availableCredits: asNumber(billing.availableCredits), heldCredits: asNumber(billing.heldCredits), lifetimeSpentCredits: asNumber(billing.lifetimeSpentCredits), lifetimePurchasedCredits: asNumber(billing.lifetimePurchasedCredits), lifetimeBonusCredits: asNumber(billing.lifetimeBonusCredits), subscriptionStatus: billing.subscriptionStatus, subscriptionPlan: billing.subscriptionPlanCode, pricingTier: billing.pricingTier, pricingCountry: billing.pricingCountry } : null, sessions: facts.sessions.slice(-50).reverse().map((row) => ({ source: row.source || "unknown", country: row.countryCode || null, completedAt: loginAt(row) })), reservations: facts.reservations.slice(-100).reverse().map((row) => ({ id: id(row._id), ...normalizeToolCode(row.toolCode, row.featureCode), rawToolCode: row.toolCode || null, featureCode: row.featureCode || null, status: indexed.compensatedReservations.has(id(row._id)) ? "compensated" : row.status, credits: asNumber(row.creditsReserved), processor: row.processor || null, occurredAt: reservationAt(row), durationMs: row.status === "committed" && row.committedAt && row.createdAt ? asDate(row.committedAt) - asDate(row.createdAt) : null })), ledger: (indexed.ledgers.get(facts.userId) || []).slice().sort((a, b) => asDate(b.createdAt) - asDate(a.createdAt)).slice(0, 100).map((row) => ({ reason: row.reason, deltaCredits: asNumber(row.deltaCredits), tool: normalizeToolCode(row.toolCode, row.featureCode), createdAt: row.createdAt })), purchases: facts.purchases.map(safePurchase), subscriptions: (indexed.subscriptions.get(facts.userId) || []).map((row) => ({ planCode: row.planCode, status: row.status, currentPeriodStart: row.currentPeriodStart, currentPeriodEnd: row.currentPeriodEnd, nextChargeAt: row.nextChargeAt })), refunds: (indexed.refunds.get(facts.userId) || []).map((row) => ({ status: row.status, amountPaise: asNumber(row.amountPaise), reason: row.reason || null, createdAt: row.createdAt })), feedback: [...legacyFeedback.map((row) => ({ source: "legacy", rawScore: row.score ?? null, score: row.score === null || row.score === undefined ? null : Math.round((asNumber(row.score) / 10 * 5) * 10) / 10, scale: 5, sourceScale: 10, type: row.feedbackType || null, tool: row.toolId || null, createdAt: row.createdAt })), ...feedback.map((row) => ({ source: "current", rawScore: row.rating ?? null, score: row.rating ?? null, rating: row.rating ?? null, scale: 5, sourceScale: 5, comment: row.isAnonymous ? null : row.comment || null, path: row.path || null, createdAt: row.createdAt }))].sort((a, b) => asDate(b.createdAt) - asDate(a.createdAt)), featureRequests: requests.map((row) => ({ title: row.title, status: row.status, board: row.board, votes: asNumber(row.votes), comments: asNumber(row.commentsCount), createdAt: row.createdAt })), coverage: { periodDays: detailRange.days, nonCreditToolActivity: !facts.activityAvailable ? "unavailable" : facts.pluginActiveDays > 0 ? "measured" : "no_activity_recorded", pluginActiveDays: facts.activityAvailable ? facts.pluginActiveDays : null, activeDaysInRange: facts.activityAvailable ? facts.distinctDays.size : null, message: !facts.activityAvailable ? "Plugin activity could not be read, so this profile shows logins and credited tool activity only. This is a read failure, not an absence of activity." : facts.pluginActiveDays > 0 ? `Includes successful logins, credited tool activity, and plugin activity for tools that do not consume credits. Covers the last ${detailRange.days} days.` : "Includes successful logins and credited tool activity. No plugin activity has been recorded for this user in the selected period." } };
 }
 
 function groupToolReservations(rows, compensatedReservations = new Set()) {
@@ -784,7 +826,7 @@ export async function productToolDetail(toolCode, days = 30) {
 export async function productLifecycle(days = 90) {
   const range = period(days); const core = await loadCore(range); const indexed = indexCore(core); const cohort = core.users.filter((row) => inRange(row.createdAt, range.currentStart, range.now));
   const facts = cohort.map((user) => ({ user, facts: userFacts(user, indexed, range) }));
-  const loggedIn = facts.filter((row) => row.facts.sessions.length); const activated = facts.filter((row) => row.facts.firstCommitted); const returned = facts.filter((row) => row.facts.distinctDays.size >= 2); const purchased = facts.filter((row) => row.facts.captured.length);
+  const loggedIn = facts.filter((row) => row.facts.sessions.length); const activated = facts.filter((row) => row.facts.firstCommitted); const returned = facts.filter((row) => row.facts.distinctDays.size >= 2); const purchased = facts.filter((row) => resolveLifecycleStage(row.facts, row.facts.billing) === "customer");
   const stages = [{ key: "signed_up", label: "Signed up", users: cohort.length }, { key: "logged_in", label: "Successful login", users: loggedIn.length }, { key: "activated", label: "Credited tool activation", users: activated.length }, { key: "returned", label: "Returned another day", users: returned.length }, { key: "purchased", label: "Confirmed purchase", users: purchased.length }].map((stage, index, all) => ({ ...stage, conversionFromPrevious: index ? percent(stage.users, all[index - 1].users) : 100 }));
   const loginTimes = loggedIn.map(({ user, facts: item }) => loginAt(item.sessions[0]) - asDate(user.createdAt)); const activationTimes = activated.map(({ user, facts: item }) => reservationAt(item.firstCommitted) - asDate(user.createdAt));
   const weeks = new Map();
@@ -838,6 +880,16 @@ export async function productDataHealth(newsletterConfigured = false) {
   const telemetry = await telemetryHealth(new Date());
   telemetry.ageHours = telemetry.latestAt ? Math.round(((Date.now() - telemetry.latestAt) / 36e5) * 10) / 10 : null;
   const completedSessions = core.sessions.filter(successfulSession).length; const incompleteLinkedSessions = core.sessions.filter((row) => row.user && !successfulSession(row)).length; const terminal = core.reservations.filter(terminalReservation); const attributed = terminal.filter((row) => row.toolCode || row.featureCode).length;
+  // Money may have moved without anything being delivered. A purchase sits at
+  // created/pending from checkout initiation until the provider confirms it, so
+  // one that is still pending an hour later is either an abandoned checkout or
+  // a payment that settled and never got recorded — and the two are
+  // indistinguishable here, which is exactly why it needs surfacing rather than
+  // silently ageing.
+  const stalledCheckouts = core.purchases.filter(
+    (row) => ["created", "pending"].includes(row.status) &&
+      range.now - asDate(row.createdAt) > 60 * 60 * 1000
+  );
   const capturedPurchaseIds = new Set(core.purchases.filter((row) => row.status === "captured").map((row) => id(row._id)));
   const processedRefunds = core.refunds.filter((row) => row.status === "processed");
   const unmatchedProcessedRefunds = processedRefunds.filter((row) => !capturedPurchaseIds.has(id(row.purchase))).length;

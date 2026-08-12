@@ -6,7 +6,7 @@ setupMobileMenu();
 async function load() {
   try {
     const data = await json(`/api/operations/tools?days=${$("rangeDays").value}`);
-    $("toolMetrics").innerHTML = metricCard("Completed jobs", number(data.summary.completedJobs), "Successfully delivered outcomes")
+    $("toolMetrics").innerHTML = metricCard("Credited jobs", number(data.summary.completedJobs), "Billable work only — credit-free tools are counted under activity")
       + metricCard("Credits consumed", number(data.summary.creditsConsumed), "Across completed jobs")
       + metricCard("Expired jobs", number(data.summary.expiredJobs), "Processing did not finish")
       + metricCard("Activity tracked", number(data.summary.telemetryOnlyTools), "Tools measured from plugin activity")

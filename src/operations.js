@@ -110,16 +110,22 @@ async function loadConsumption({ days = "all", userIds = null } = {}) {
     lifecycle.set(key, current);
   }
 
-  return commits.map((commit) => {
-    const state = lifecycle.get(id(commit.reservation)) || { held: 0, compensated: 0, source: null };
-    return {
-      userId: id(commit.user),
-      reservationId: id(commit.reservation),
-      tool: normalizedTool(commit.toolCode || commit.featureCode ? commit : state.source),
-      credits: Math.max(0, state.held - state.compensated),
-      createdAt: commit.createdAt || null,
-    };
-  });
+  return commits
+    .map((commit) => {
+      const state = lifecycle.get(id(commit.reservation)) || { held: 0, compensated: 0, source: null };
+      const credits = Math.max(0, state.held - state.compensated);
+      return {
+        userId: id(commit.user),
+        reservationId: id(commit.reservation),
+        tool: normalizedTool(commit.toolCode || commit.featureCode ? commit : state.source),
+        credits,
+        // Fully refunded: the user was charged and then made whole, so this is
+        // not consumption. The users page already excludes these; counting them
+        // here made the two pages disagree about the same reservation.
+        compensated: state.held > 0 && credits === 0,
+        createdAt: commit.createdAt || null,
+      };
+    });
 }
 
 function aggregateConsumption(rows) {
@@ -250,7 +256,12 @@ export async function creditOverview(days = 30) {
       totalAvailableCredits: billings.reduce((sum, row) => sum + number(row.availableCredits), 0),
       totalHeldCredits: billings.reduce((sum, row) => sum + number(row.heldCredits), 0),
       creditsSpentInRange: consumptionRows.reduce((sum, row) => sum + row.credits, 0),
-      completedUsesInRange: consumptionRows.length,
+      // Excludes fully compensated reservations: the user was charged and then
+      // made whole, so it is not consumption. The users page already excluded
+      // these, so counting them here made the two pages disagree about the same
+      // reservation. The rows themselves are kept — a tool whose uses are all
+      // being refunded is a signal worth seeing, not one to hide.
+      completedUsesInRange: consumptionRows.filter((row) => !row.compensated).length,
       lowCreditUsers: billings.filter((row) => number(row.availableCredits) <= threshold).length,
     },
     tools: consumption.tools,

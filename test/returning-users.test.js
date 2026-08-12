@@ -535,3 +535,80 @@ test("an unreadable analytics store is reported as unknown, never as inactivity"
   );
   assert.ok(!brokenRow.segments.includes("at_risk"), "nor into at_risk");
 });
+
+test("a paying subscriber is a customer even when the purchase never settles", async (t) => {
+  const client = await boot(t, "UTC");
+  const backend = client.db("waysorted");
+  const now = new Date();
+  const payer = new ObjectId();
+  const tyre = new ObjectId();
+
+  await backend.collection("users").insertMany([
+    { _id: payer, email: "payer@example.com", createdAt: new Date(now.getTime() - 5 * DAY_MS) },
+    { _id: tyre, email: "browser@example.com", createdAt: new Date(now.getTime() - 5 * DAY_MS) },
+  ]);
+  await backend.collection("sessions").insertMany([
+    { user: payer, source: "figma", completed: true, completedAt: now, createdAt: now },
+    { user: tyre, source: "figma", completed: true, completedAt: now, createdAt: now },
+  ]);
+  // The wallet says the subscription is live and credits were purchased, but
+  // the Purchase row is stuck at "pending" — the real production shape.
+  await backend.collection("userbillings").insertOne({
+    user: payer, availableCredits: 325, heldCredits: 0, lifetimeSpentCredits: 0,
+    lifetimePurchasedCredits: 225, subscriptionStatus: "active",
+    subscriptionPlanCode: "sub_month_1", updatedAt: now,
+  });
+  await backend.collection("purchases").insertOne({
+    user: payer, productCode: "sub_month_1", kind: "subscription", status: "pending",
+    amountPaise: 14900, currency: "INR", creditsGranted: 150,
+    createdAt: new Date(now.getTime() - 3 * 60 * 60 * 1000), updatedAt: now,
+  });
+
+  const users = await request(app)
+    .get("/api/operations/users?days=30")
+    .set("Authorization", basicAuth)
+    .expect(200);
+
+  const payerRow = users.body.items.find((r) => r.email === "payer@example.com");
+  const tyreRow = users.body.items.find((r) => r.email === "browser@example.com");
+  assert.equal(payerRow.lifecycleStage, "customer", "an active subscription wallet makes them a customer");
+  assert.equal(tyreRow.lifecycleStage, "logged_in");
+  assert.notEqual(
+    payerRow.lifecycleStage, tyreRow.lifecycleStage,
+    "a paying customer must never render identically to someone who never opened a checkout"
+  );
+
+  const summary = await request(app)
+    .get("/api/operations/summary?days=30")
+    .set("Authorization", basicAuth)
+    .expect(200);
+  const stalled = summary.body.needsAttention.find((a) => /checkouts have not settled/.test(a.title));
+  assert.ok(stalled, "an unsettled checkout is surfaced");
+  assert.equal(stalled.severity, "critical");
+});
+
+test("a started-but-unpaid checkout is distinguishable from never trying", async (t) => {
+  const client = await boot(t, "UTC");
+  const backend = client.db("waysorted");
+  const now = new Date();
+  const user = new ObjectId();
+
+  await backend.collection("users").insertOne({ _id: user, email: "tried@example.com", createdAt: now });
+  await backend.collection("sessions").insertOne({
+    user, source: "figma", completed: true, completedAt: now, createdAt: now,
+  });
+  // Reached checkout, no wallet evidence of payment.
+  await backend.collection("purchases").insertOne({
+    user, productCode: "sub_month_1", kind: "subscription", status: "pending",
+    amountPaise: 14900, currency: "INR", creditsGranted: 150, createdAt: now, updatedAt: now,
+  });
+
+  const users = await request(app)
+    .get("/api/operations/users?days=30")
+    .set("Authorization", basicAuth)
+    .expect(200);
+
+  const row = users.body.items.find((r) => r.email === "tried@example.com");
+  assert.equal(row.lifecycleStage, "checkout_started", "reaching checkout is not the same as never trying");
+  assert.notEqual(row.lifecycleStage, "customer", "nor is it proof of payment");
+});

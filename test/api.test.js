@@ -93,7 +93,11 @@ test("credits-first operations APIs", async (t) => {
     assert.equal(response.body.summary.totalAvailableCredits, 60);
     assert.equal(response.body.summary.totalHeldCredits, 2);
     assert.equal(response.body.summary.lowCreditUsers, 2);
-    assert.equal(response.body.summary.completedUsesInRange, 4);
+    // A fully compensated reservation is a charge that was refunded, so it is
+    // not consumption. The users page already excluded these; the credits page
+    // counted them, so the two pages disagreed about the same reservation.
+    // Both now exclude it, taking this from 4 to 3.
+    assert.equal(response.body.summary.completedUsesInRange, 3);
     assert.equal(response.body.summary.creditsSpentInRange, 8);
     assert.equal(response.body.tools.find((row) => row.tool === "palette").creditsSpent, 5);
     assert.equal(response.body.tools.some((row) => row.tool === "pdf"), false);
