@@ -612,3 +612,61 @@ test("a started-but-unpaid checkout is distinguishable from never trying", async
   assert.equal(row.lifecycleStage, "checkout_started", "reaching checkout is not the same as never trying");
   assert.notEqual(row.lifecycleStage, "customer", "nor is it proof of payment");
 });
+
+test("anonymous history follows the person when they sign up", async (t) => {
+  const client = await boot(t, "UTC");
+  const backend = client.db("waysorted");
+  const analytics = client.db("analytics");
+  const now = new Date();
+  const user = new ObjectId();
+  const anonId = "figma_preSignup";
+
+  // They signed up today, after three days of signed-out use.
+  await backend.collection("users").insertOne({
+    _id: user, email: "converted@example.com", createdAt: now,
+  });
+  await backend.collection("sessions").insertOne({
+    user, source: "figma", completed: true, completedAt: now, createdAt: now,
+  });
+
+  const anonEvent = (eventId, dayOffset) => pluginEvent({
+    eventId, eventType: "feature_used", tool: "palettable",
+    eventAt: new Date(now.getTime() - dayOffset * DAY_MS),
+    user: { isAuthenticated: false, userId: null, email: null, anonymousId: anonId },
+  });
+
+  await analytics.collection("plugin_analytics_events").insertMany([
+    anonEvent("pre1", 3),
+    anonEvent("pre2", 2),
+    anonEvent("pre3", 1),
+    // The link the plugin emits at sign-in. It is the only record connecting
+    // the two identities — both sides blank anonymousId once authenticated.
+    pluginEvent({
+      eventId: "link1", eventType: "identity_linked", tool: "dashboard", eventAt: now,
+      user: { isAuthenticated: true, userId: String(user), email: null, anonymousId: null },
+      payload: { anonymousId: anonId, userId: String(user), email: "converted@example.com" },
+    }),
+  ]);
+
+  const users = await request(app)
+    .get("/api/operations/users?days=30")
+    .set("Authorization", basicAuth)
+    .expect(200);
+
+  const row = users.body.items.find((r) => r.email === "converted@example.com");
+  assert.equal(row.pluginActiveDays, 3, "their pre-signup days belong to them");
+  assert.ok(row.segments.includes("returning"), "three days is a return, not a first visit");
+  assert.ok(row.segments.includes("activated"), "credit-free use before signup still activates");
+  assert.equal(row.topTool.label, "Palettable", "their history drives latest tool");
+  assert.equal(row.lifecycleStage, "returning");
+
+  const summary = await request(app)
+    .get("/api/operations/summary?days=30")
+    .set("Authorization", basicAuth)
+    .expect(200);
+  assert.equal(
+    summary.body.metrics.anonymousVisitors.value, 0,
+    "they are one account, not also a phantom anonymous visitor"
+  );
+  assert.equal(summary.body.metrics.returningUsers.value, 1);
+});

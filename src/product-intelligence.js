@@ -79,6 +79,11 @@ export const PASSIVE_EVENT_TYPES = [
   "session_heartbeat",
   "backend_operation",
   "user_context_changed",
+  // Emitted automatically when a signed-out session signs in. It is the record
+  // that stitches their history to the account, so it must be stored and read —
+  // but signing in is not tool use, and counting it would add a phantom active
+  // day on the conversion date.
+  "identity_linked",
   "analytics_transport_updated",
   "user_notification_shown",
 ];
@@ -112,7 +117,55 @@ export const NON_PERSISTED_EVENT_TYPES = [
  * and routed to the email index here, so historical data resolves correctly on
  * read.
  */
-async function pluginActivityDaysByIdentity(start, end) {
+/**
+ * Maps a pseudonymous id to the account it turned out to belong to.
+ *
+ * The plugin emits identity_linked when a signed-out session signs in, and it
+ * is the only record of that connection: both the plugin and the ingest blank
+ * anonymousId once a user is authenticated, so after the fact there is nothing
+ * left to join on. Without this, everything a person did before signing up is
+ * stranded under their old pseudonymous id — they lose their activation, their
+ * returns and their history at the exact moment they convert, and are
+ * simultaneously still counted as a live anonymous visitor.
+ *
+ * Built over ALL time rather than the reporting window: a link made in March
+ * must still resolve March activity when a July window is requested.
+ */
+async function identityLinksByAnonymousId() {
+  const links = new Map();
+  try {
+    const collection = await getEventsCollection();
+    const rows = await collection
+      .aggregate([
+        { $match: { eventType: "identity_linked" } },
+        { $sort: { eventAt: 1 } },
+        {
+          $group: {
+            _id: "$payload.anonymousId",
+            userId: { $last: "$payload.userId" },
+            email: { $last: "$payload.email" },
+          },
+        },
+      ])
+      .toArray();
+
+    for (const row of rows) {
+      if (!row._id) continue;
+      const userId = row.userId ? String(row.userId) : null;
+      const email = row.email ? String(row.email).toLowerCase() : null;
+      // The account id is preferred; email is the fallback because the join on
+      // the read side resolves it against a real user record.
+      if (!userId && !email) continue;
+      links.set(String(row._id), userId || email);
+    }
+  } catch (error) {
+    // Losing the links degrades attribution; it must not break the page.
+    console.error("Identity link aggregation failed:", error?.message || error);
+  }
+  return links;
+}
+
+async function pluginActivityDaysByIdentity(start, end, identityLinks = new Map()) {
   const timezone = reportingTimezone();
   const byUserId = new Map();
   const byEmail = new Map();
@@ -151,8 +204,12 @@ async function pluginActivityDaysByIdentity(start, end) {
     for (const row of rows) {
       const identity = row._id?.identity;
       const anonymous = row._id?.anonymous;
-      const target = !identity ? byAnonymous : looksLikeEmail(identity) ? byEmail : byUserId;
-      const rawKey = identity || anonymous;
+      // A signed-out row is routed to the account it was later linked to, so
+      // pre-signup history lands with the person rather than beside them.
+      const linked = identity ? null : identityLinks.get(String(anonymous || ""));
+      const resolved = identity || linked || null;
+      const target = !resolved ? byAnonymous : looksLikeEmail(resolved) ? byEmail : byUserId;
+      const rawKey = resolved || anonymous;
       if (!rawKey) continue;
       const key = looksLikeEmail(rawKey) ? String(rawKey).toLowerCase() : String(rawKey);
       const existing = target.get(key) || new Set();
@@ -180,7 +237,7 @@ async function pluginActivityDaysByIdentity(start, end) {
  * users read as having used nothing at all. Telemetry knows what they actually
  * opened, whether or not it billed them.
  */
-async function pluginTopToolByIdentity(start, end) {
+async function pluginTopToolByIdentity(start, end, identityLinks = new Map()) {
   const byUserId = new Map();
   const byEmail = new Map();
   const byAnonymous = new Map();
@@ -217,8 +274,13 @@ async function pluginTopToolByIdentity(start, end) {
       if (NON_TOOL_SURFACES.has(normalized.key)) continue;
 
       const identity = row._id?.identity;
-      const target = !identity ? byAnonymous : looksLikeEmail(identity) ? byEmail : byUserId;
-      const rawKey = identity || row._id?.anonymous;
+      const anonymous = row._id?.anonymous;
+      // A signed-out row is routed to the account it was later linked to, so
+      // pre-signup history lands with the person rather than beside them.
+      const linked = identity ? null : identityLinks.get(String(anonymous || ""));
+      const resolved = identity || linked || null;
+      const target = !resolved ? byAnonymous : looksLikeEmail(resolved) ? byEmail : byUserId;
+      const rawKey = resolved || anonymous;
       if (!rawKey) continue;
       const key = looksLikeEmail(rawKey) ? String(rawKey).toLowerCase() : String(rawKey);
 
@@ -237,7 +299,14 @@ async function pluginTopToolByIdentity(start, end) {
       }
     }
   } catch (error) {
-    console.error("Plugin top-tool aggregation failed:", error?.message || error);
+    // A ReferenceError here previously looked identical to an unreachable
+    // database: the map came back empty and every caller treated that as
+    // "this user has used nothing".
+    console.error(
+      error instanceof ReferenceError || error instanceof TypeError
+        ? `Plugin top-tool aggregation has a bug: ${error?.stack || error}`
+        : `Plugin top-tool aggregation failed: ${error?.message || error}`
+    );
   }
   return { byUserId, byEmail, byAnonymous };
 }
@@ -310,19 +379,23 @@ async function loadCore(range = null) {
   // do the windowing removes the mismatch entirely — every day in a window
   // index is in that window by construction, so no day-string filtering is
   // needed on read.
+  // Resolved once and shared: every aggregation below must agree about which
+  // pseudonymous ids belong to which accounts, or a user's history splits.
+  const identityLinks = await identityLinksByAnonymousId();
   const [pluginActivity, pluginActivityCurrent, pluginActivityPrevious, pluginTopTools] = await Promise.all([
     // Wide index: cohort retention measures each user's return relative to
     // their own signup date, so it needs history beyond any single window.
-    pluginActivityDaysByIdentity(new Date(Date.now() - lookbackDays * DAY_MS), new Date()),
+    pluginActivityDaysByIdentity(new Date(Date.now() - lookbackDays * DAY_MS), new Date(), identityLinks),
     range
-      ? pluginActivityDaysByIdentity(range.currentStart, range.now)
+      ? pluginActivityDaysByIdentity(range.currentStart, range.now, identityLinks)
       : Promise.resolve(null),
     range
-      ? pluginActivityDaysByIdentity(range.previousStart, range.currentStart)
+      ? pluginActivityDaysByIdentity(range.previousStart, range.currentStart, identityLinks)
       : Promise.resolve(null),
     pluginTopToolByIdentity(
       range ? range.currentStart : new Date(Date.now() - lookbackDays * DAY_MS),
-      range ? range.now : new Date()
+      range ? range.now : new Date(),
+      identityLinks
     ),
   ]);
 
