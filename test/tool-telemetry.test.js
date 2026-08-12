@@ -340,7 +340,7 @@ test("top tool shows a credit-free tool the user actually used", async (t) => {
 
   const paid = users.body.items.find((r) => r.email === "paid@example.com");
   assert.equal(paid.topTool.label, "Palettable");
-  assert.equal(paid.topTool.credited, true, "credited work still wins where it exists");
+  assert.equal(paid.topTool.credited, true, "their only tool use was credited");
 
   const idle = users.body.items.find((r) => r.email === "idle@example.com");
   assert.equal(idle.topTool, null, "genuine inactivity stays empty");
@@ -397,7 +397,10 @@ test("using a credit-free tool activates a user and forms their journey", async 
   assert.ok(freeRow.segments.includes("activated"), "credit-free tool use is activation");
   assert.ok(!freeRow.segments.includes("not_activated"));
   assert.equal(freeRow.creditedJobs, 0, "and it billed nothing");
-  assert.equal(freeRow.topTool.label, "Comment Summarizer");
+  // Comment Summarizer has more events (2 vs 1), but Icon Library was used
+  // more recently — the column reports what they are using now, not what they
+  // used most.
+  assert.equal(freeRow.topTool.label, "Icon Library", "most recent wins over most frequent");
   assert.equal(freeRow.topTool.credited, false);
   assert.ok(freeRow.segments.includes("returning"), "two distinct days is a return");
 
@@ -415,4 +418,56 @@ test("using a credit-free tool activates a user and forms their journey", async 
   assert.equal(stage("activated"), 1, "the credit-free user activated");
   assert.equal(stage("returned"), 1, "and returned");
   assert.equal(lifecycle.body.stuck.loggedInNotActivated, 1, "only the genuinely idle user is stuck");
+});
+
+test("latest tool is the one most recently used, not the last credited one", async (t) => {
+  const mongod = await MongoMemoryServer.create();
+  t.after(async () => { await closeDb(); await mongod.stop(); });
+  process.env.MONGODB_URI = mongod.getUri("analytics");
+  process.env.MONGODB_DB = "analytics";
+  process.env.BACKEND_MONGODB_URI = mongod.getUri("waysorted");
+  process.env.BACKEND_MONGODB_DB = "waysorted";
+  process.env.DASHBOARD_BASIC_AUTH_USER = "test";
+  process.env.DASHBOARD_BASIC_AUTH_PASS = "test";
+
+  const client = new MongoClient(mongod.getUri());
+  await client.connect();
+  t.after(() => client.close());
+  const now = new Date();
+  const HOUR = 60 * 60 * 1000;
+  const user = new ObjectId();
+
+  await client.db("waysorted").collection("users").insertOne({
+    _id: user, email: "recent@example.com", createdAt: new Date(now.getTime() - 30 * 24 * HOUR),
+  });
+
+  // Plenty of credited history on one tool, ending three hours ago...
+  await client.db("waysorted").collection("usagereservations").insertMany(
+    [5, 4, 3].map((h) => ({
+      _id: new ObjectId(), user, toolCode: "unit_converter", featureCode: "convert",
+      status: "committed", creditsReserved: 2,
+      createdAt: new Date(now.getTime() - h * HOUR),
+      committedAt: new Date(now.getTime() - h * HOUR),
+      updatedAt: new Date(now.getTime() - h * HOUR),
+    }))
+  );
+  // ...then a single credit-free export one hour ago. That is what they are
+  // actually using now, and what the column should report.
+  await client.db("analytics").collection("plugin_analytics_events").insertOne({
+    eventId: "recent-pal", schemaVersion: 2, isSemantic: true, eventType: "feature_used",
+    sessionId: "s1", deviceId: "d1", source: "main", tool: "palettable",
+    eventAt: new Date(now.getTime() - HOUR), receivedAt: now,
+    payload: { action: "export-palette" },
+    user: { isAuthenticated: true, userId: String(user), email: null, anonymousId: null },
+  });
+
+  const users = await request(app)
+    .get("/api/operations/users?days=30")
+    .set("Authorization", basicAuth)
+    .expect(200);
+
+  const row = users.body.items.find((r) => r.email === "recent@example.com");
+  assert.equal(row.topTool.label, "Palettable", "the most recent tool wins, credited or not");
+  assert.equal(row.topTool.credited, false, "and it is marked as charging nothing");
+  assert.equal(row.creditedJobs, 3, "the credited history is still reported separately");
 });

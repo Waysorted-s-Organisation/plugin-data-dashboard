@@ -206,7 +206,7 @@ async function pluginTopToolByIdentity(start, end) {
             lastEventAt: { $max: "$eventAt" },
           },
         },
-        { $sort: { events: -1 } },
+        { $sort: { lastEventAt: -1 } },
       ])
       .toArray();
 
@@ -223,8 +223,10 @@ async function pluginTopToolByIdentity(start, end) {
       const key = looksLikeEmail(rawKey) ? String(rawKey).toLowerCase() : String(rawKey);
 
       const existing = target.get(key);
-      // Rows arrive ordered by event count, so the first one wins.
-      if (!existing || row.events > existing.events) {
+      // Rows arrive newest-first, so the first one for an identity is the tool
+      // they most recently used.
+      const lastEventAt = asDate(row.lastEventAt);
+      if (!existing || (lastEventAt && lastEventAt > existing.lastEventAt)) {
         target.set(key, {
           key: normalized.key,
           label: normalized.label,
@@ -454,10 +456,20 @@ function userFacts(user, indexed, range) {
     if (!current.latestAt || occurredAt > asDate(current.latestAt)) current.latestAt = occurredAt;
     tools.set(tool.key, current);
   }
-  const creditedTopTool = [...tools.values()].sort((a, b) => b.completed - a.completed || b.credits - a.credits)[0] || null;
-  const topTool = creditedTopTool
-    ? { ...creditedTopTool, credited: true }
-    : observedTopTool;
+  // The most recently used tool that charged credits.
+  const creditedTopTool = [...tools.values()].sort((a, b) => asDate(b.latestAt) - asDate(a.latestAt))[0] || null;
+  // Whichever the person touched last, regardless of whether it billed them.
+  // Ranking credited work first meant a single old paid job outranked a tool
+  // used minutes ago, so the column answered "what did they last pay for"
+  // rather than "what are they using".
+  const creditedAt = creditedTopTool ? asDate(creditedTopTool.latestAt) : null;
+  const observedAt = observedTopTool ? asDate(observedTopTool.lastEventAt) : null;
+  const topTool =
+    creditedTopTool && (!observedAt || (creditedAt && creditedAt >= observedAt))
+      ? { ...creditedTopTool, credited: true, lastUsedAt: creditedAt }
+      : observedTopTool
+        ? { ...observedTopTool, lastUsedAt: observedAt }
+        : null;
   return { userId, billing, sessions, reservations, committed, purchases, captured, currentSessions, currentCommitted, distinctDays, pluginActiveDays, activityAvailable, activated, lastLogin, lastLoginDate, firstCommitted, segments, topTool };
 }
 
