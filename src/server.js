@@ -146,7 +146,11 @@ function normalizeUser(value, fallbackSeed) {
     anonymousId: isAuthenticated
       ? null
       : safeString(user.anonymousId || user.anonId, 180) || anonymousId(fallbackSeed),
-    name: isAuthenticated ? safeString(user.name, 160) : null,
+    // Kept for signed-out visitors too. Figma exposes their display name to
+    // the plugin and names them in the publisher's usage notifications, so
+    // discarding it here left a visitor recognisable in Figma but anonymous in
+    // the dashboard — which is the gap that made them unreachable.
+    name: safeString(user.name, 160),
     email: isAuthenticated ? inferredEmail : null,
     identitySource: safeString(user.identitySource, 80) || (isAuthenticated ? "authenticated" : "anonymous"),
     creditsRemaining: Number.isFinite(creditValue) ? Math.max(0, creditValue) : null,

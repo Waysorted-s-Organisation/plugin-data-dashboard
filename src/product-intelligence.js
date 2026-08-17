@@ -184,6 +184,7 @@ async function pluginActivityDaysByIdentity(start, end, identityLinks = new Map(
   // discarded them entirely, leaving the platform's largest population
   // unmeasured purely because it had no name attached.
   const byAnonymous = new Map();
+  const namesByAnonymous = new Map();
   let available = true;
   try {
     const collection = await getEventsCollection();
@@ -194,6 +195,9 @@ async function pluginActivityDaysByIdentity(start, end, identityLinks = new Map(
           $group: {
             _id: {
               identity: { $ifNull: ["$user.userId", "$user.email"] },
+              // Carried so a signed-out visitor can be shown by the name Figma
+              // gives them, which is how they are recognisable to the owner.
+              name: "$user.name",
               // Falls back to the device so a signed-out visitor is still
               // counted once even when an older event carries no pseudonymous id.
               // The device is the anchor, not the pseudonymous id. The plugin
@@ -212,6 +216,7 @@ async function pluginActivityDaysByIdentity(start, end, identityLinks = new Map(
           $group: {
             _id: { identity: "$_id.identity", anonymous: "$_id.anonymous" },
             days: { $addToSet: "$_id.day" },
+            latestName: { $last: "$_id.name" },
           },
         },
       ])
@@ -231,6 +236,9 @@ async function pluginActivityDaysByIdentity(start, end, identityLinks = new Map(
       const existing = target.get(key) || new Set();
       for (const day of row.days || []) existing.add(day);
       target.set(key, existing);
+      if (target === byAnonymous && row.latestName) {
+        namesByAnonymous.set(key, String(row.latestName));
+      }
     }
   } catch (error) {
     // Login-derived days must still work if the analytics store is unreachable,
@@ -242,7 +250,7 @@ async function pluginActivityDaysByIdentity(start, end, identityLinks = new Map(
   }
   // Built once here rather than per user: userFacts runs for every row in the
   // users table, and constructing an Intl.DateTimeFormat is not cheap.
-  return { byUserId, byEmail, byAnonymous, timezone, available, formatDay: dayKeyFormatter(timezone) };
+  return { byUserId, byEmail, byAnonymous, namesByAnonymous, timezone, available, formatDay: dayKeyFormatter(timezone) };
 }
 
 /**
@@ -499,9 +507,9 @@ function indexCore(core) {
     // userFacts reports on the CURRENT window, so it gets the current-window
     // index. The wide index is kept separately for cohort retention, which
     // measures each user against their own signup date rather than a window.
-    pluginActivity: core.pluginActivityCurrent || core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") },
+    pluginActivity: core.pluginActivityCurrent || core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), namesByAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") },
     pluginTopTools: core.pluginTopTools || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map() },
-    pluginActivityLifetime: core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") },
+    pluginActivityLifetime: core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), namesByAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") },
     billing: new Map(core.billings.map((row) => [id(row.user), row])),
     sessions: group(core.sessions), reservations: group(core.reservations), ledgers: group(core.ledgers),
     purchases: group(core.purchases), subscriptions: group(core.subscriptions), refunds: group(core.refunds), grants: group(core.starterGrants),
@@ -521,7 +529,7 @@ function userFacts(user, indexed, range) {
   // Active days combine backend logins with plugin activity, bucketed in the
   // configured reporting timezone. Using logins alone made returns from the
   // plugin — which reuses a stored token and creates no new session — invisible.
-  const activity = indexed.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") };
+  const activity = indexed.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), namesByAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") };
   const formatDay = activity.formatDay || dayKeyFormatter(activity.timezone);
   const distinctDays = new Set(currentSessions.map((row) => formatDay.format(loginAt(row))));
   // Both indexes must be merged, not chosen between: a user can have recent
@@ -681,7 +689,7 @@ function periodSummary(core, start, end, activityIndex = null) {
   // Active days per user, from logins and plugin activity alike, bucketed in
   // the reporting timezone. Counting logins only made plugin-only returns
   // invisible, which is why the dashboard reported no returning users.
-  const activity = activityIndex || core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") };
+  const activity = activityIndex || core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), namesByAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") };
   const formatDay = activity.formatDay || dayKeyFormatter(activity.timezone);
   const daysByUser = new Map();
   const addDay = (key, day) => {
@@ -812,6 +820,7 @@ function anonymousVisitorRows(indexed, range) {
   for (const [anonymousId, days] of activity.byAnonymous) {
     if (!anonymousId || !days?.size) continue;
     const topTool = topTools.byAnonymous.get(anonymousId) || null;
+    const displayName = activity.namesByAnonymous?.get(anonymousId) || null;
     const lifetimeDays = lifetime.byAnonymous?.get(anonymousId) || days;
     const lastActiveAt = topTool ? asDate(topTool.lastEventAt) : null;
     const firstSeenDay = [...lifetimeDays].sort()[0] || null;
@@ -819,7 +828,7 @@ function anonymousVisitorRows(indexed, range) {
     rows.push({
       id: anonymousId,
       anonymous: true,
-      name: null,
+      name: displayName,
       email: null,
       // Day-resolution: an anonymous visitor has no account record to date.
       joinedAt: firstSeenDay ? new Date(`${firstSeenDay}T00:00:00Z`) : null,
