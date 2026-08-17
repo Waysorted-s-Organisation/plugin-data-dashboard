@@ -145,19 +145,27 @@ async function identityLinksByAnonymousId() {
             _id: "$payload.anonymousId",
             userId: { $last: "$payload.userId" },
             email: { $last: "$payload.email" },
+            // The device the link happened on. Anonymous activity is keyed by
+            // device, so the link has to be findable by device too — the
+            // pseudonymous id in the payload is only one of the two identities
+            // a device produces.
+            deviceIds: { $addToSet: "$deviceId" },
           },
         },
       ])
       .toArray();
 
     for (const row of rows) {
-      if (!row._id) continue;
       const userId = row.userId ? String(row.userId) : null;
       const email = row.email ? String(row.email).toLowerCase() : null;
       // The account id is preferred; email is the fallback because the join on
       // the read side resolves it against a real user record.
       if (!userId && !email) continue;
-      links.set(String(row._id), userId || email);
+      const account = userId || email;
+      if (row._id) links.set(String(row._id), account);
+      for (const deviceId of row.deviceIds || []) {
+        if (deviceId) links.set(String(deviceId), account);
+      }
     }
   } catch (error) {
     // Losing the links degrades attribution; it must not break the page.
@@ -188,7 +196,14 @@ async function pluginActivityDaysByIdentity(start, end, identityLinks = new Map(
               identity: { $ifNull: ["$user.userId", "$user.email"] },
               // Falls back to the device so a signed-out visitor is still
               // counted once even when an older event carries no pseudonymous id.
-              anonymous: { $ifNull: ["$user.anonymousId", "$deviceId"] },
+              // The device is the anchor, not the pseudonymous id. The plugin
+              // derives that id from the Figma account when it can read it and
+              // from the device otherwise, and it flips between the two within
+              // a single session — so one person on one machine produced two
+              // identities, was counted twice, and had their history split so
+              // neither half looked like a return. The device id is written on
+              // every event and is stable per install.
+              anonymous: { $ifNull: ["$deviceId", "$user.anonymousId"] },
               day: { $dateToString: { date: "$eventAt", format: "%Y-%m-%d", timezone } },
             },
           },
@@ -257,7 +272,14 @@ async function pluginTopToolByIdentity(start, end, identityLinks = new Map()) {
           $group: {
             _id: {
               identity: { $ifNull: ["$user.userId", "$user.email"] },
-              anonymous: { $ifNull: ["$user.anonymousId", "$deviceId"] },
+              // The device is the anchor, not the pseudonymous id. The plugin
+              // derives that id from the Figma account when it can read it and
+              // from the device otherwise, and it flips between the two within
+              // a single session — so one person on one machine produced two
+              // identities, was counted twice, and had their history split so
+              // neither half looked like a return. The device id is written on
+              // every event and is stable per install.
+              anonymous: { $ifNull: ["$deviceId", "$user.anonymousId"] },
               tool: "$tool",
             },
             events: { $sum: 1 },
