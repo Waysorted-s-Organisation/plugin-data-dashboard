@@ -15,6 +15,7 @@ import {
   getBackendUserBillingCollection,
   getBackendUsersCollection,
   getEventsCollection,
+  onDbClose,
 } from "./db.js";
 import {
   DAY_MS,
@@ -341,12 +342,65 @@ function pageOptions(query = {}) {
 }
 
 /**
+ * Short-lived cache for the expensive part of every page load.
+ *
+ * loadCore reads nine collections in full and runs four aggregations. At the
+ * current event volume that is several seconds per request, and every panel on
+ * a page triggers it independently — so the dashboard felt broken rather than
+ * merely slow. A few seconds of staleness is a better trade than a page that
+ * takes eight seconds to paint.
+ *
+ * Keyed on the databases being read as well as the window, so a different
+ * deployment target or a test using its own server can never read another's
+ * data. Cleared by closeDb so a connection teardown cannot leave a stale
+ * handle behind it.
+ */
+const coreCache = new Map();
+
+function coreCacheTtlMs() {
+  const configured = Number(String(process.env.DASHBOARD_CORE_CACHE_MS || "").trim());
+  return Number.isFinite(configured) && configured >= 0 ? configured : 30000;
+}
+
+export function resetCoreCache() {
+  coreCache.clear();
+}
+
+// A connection teardown must not leave derived data from the old connection
+// readable — tests in particular swap databases between assertions.
+onDbClose(resetCoreCache);
+
+function coreCacheKey(range) {
+  return [
+    process.env.MONGODB_URI || "",
+    process.env.MONGODB_DB || "",
+    process.env.BACKEND_MONGODB_URI || "",
+    process.env.BACKEND_MONGODB_DB || "",
+    range ? `${range.days}` : "norange",
+  ].join("|");
+}
+
+/**
  * @param range The reporting period, when the caller has one. Plugin activity
  *   is then aggregated once per exact window so day bucketing never has to
  *   guess which period a boundary day belongs to, and the wide lookback still
  *   covers cohort math that reaches back further than any single window.
  */
 async function loadCore(range = null) {
+  const ttl = coreCacheTtlMs();
+  const cacheKey = coreCacheKey(range);
+  if (ttl > 0) {
+    const hit = coreCache.get(cacheKey);
+    // Date.now() is compared against the stored stamp rather than a timer, so
+    // an idle process cannot serve something arbitrarily old.
+    if (hit && Date.now() - hit.storedAt < ttl) return hit.value;
+  }
+  const value = await loadCoreUncached(range);
+  if (ttl > 0) coreCache.set(cacheKey, { storedAt: Date.now(), value });
+  return value;
+}
+
+async function loadCoreUncached(range = null) {
   const [users, billings, sessions, reservations, ledgers, purchases, subscriptions, refunds, starterGrants] = await Promise.all([
     (await getBackendUsersCollection()).find({}, { projection: { email: 1, name: 1, picture: 1, favorites: 1, earlyAccess: 1, createdAt: 1, updatedAt: 1 } }).toArray(),
     (await getBackendUserBillingCollection()).find({}, { projection: { user: 1, availableCredits: 1, heldCredits: 1, lifetimePurchasedCredits: 1, lifetimeBonusCredits: 1, lifetimeSpentCredits: 1, lifetimeRefundedCredits: 1, subscriptionStatus: 1, subscriptionPlanCode: 1, pricingTier: 1, pricingCountry: 1, updatedAt: 1 } }).toArray(),
@@ -715,6 +769,66 @@ export async function productSummary(days = 30) {
   return { asOf: range.now, period: { days: range.days, currentStart: range.currentStart, previousStart: range.previousStart }, coverage: { activation: "Credited tool activation only", telemetry }, metrics, whatChanged: changed, needsAttention: attention };
 }
 
+/**
+ * Signed-out visitors, as rows rather than a single number.
+ *
+ * They outnumber signed-in users several times over, and reducing them to a
+ * headcount meant the majority of the active population could not be inspected,
+ * filtered or attributed to a tool. They have a stable pseudonymous id, tool
+ * usage and active days — everything a row needs except a name.
+ *
+ * Anyone who later signed up is excluded: their history has already been
+ * stitched onto the account, and listing them here too would count one person
+ * twice.
+ */
+function anonymousVisitorRows(indexed, range) {
+  const activity = indexed.pluginActivity;
+  const lifetime = indexed.pluginActivityLifetime || activity;
+  const topTools = indexed.pluginTopTools || { byAnonymous: new Map() };
+  const rows = [];
+
+  for (const [anonymousId, days] of activity.byAnonymous) {
+    if (!anonymousId || !days?.size) continue;
+    const topTool = topTools.byAnonymous.get(anonymousId) || null;
+    const lifetimeDays = lifetime.byAnonymous?.get(anonymousId) || days;
+    const lastActiveAt = topTool ? asDate(topTool.lastEventAt) : null;
+    const firstSeenDay = [...lifetimeDays].sort()[0] || null;
+
+    rows.push({
+      id: anonymousId,
+      anonymous: true,
+      name: null,
+      email: null,
+      // Day-resolution: an anonymous visitor has no account record to date.
+      joinedAt: firstSeenDay ? new Date(`${firstSeenDay}T00:00:00Z`) : null,
+      segments: days.size >= 2 ? ["anonymous", "returning"] : ["anonymous"],
+      lifecycleStage: "anonymous",
+      lastLoginAt: null,
+      lastActiveAt,
+      lastActiveSource: "plugin",
+      latestLoginSource: null,
+      country: null,
+      successfulLogins: 0,
+      pluginActiveDays: days.size,
+      activeDaysInRange: days.size,
+      pluginActivityAvailable: activity.available !== false,
+      creditedJobs: 0,
+      creditedJobsInRange: 0,
+      completedJobs: 0,
+      jobsInRange: 0,
+      topTool,
+      toolKeys: topTool ? [topTool.key] : [],
+      walletStatus: "not_applicable",
+      availableCredits: null,
+      heldCredits: null,
+      subscriptionStatus: null,
+      subscriptionPlan: null,
+      newsletter: null,
+    });
+  }
+  return rows;
+}
+
 export async function productUsers(query = {}, newsletterByEmail = new Map()) {
   const range = period(query.days || 30); const core = await loadCore(range); const indexed = indexCore(core);
   const search = String(query.search || "").trim().toLowerCase(); const segment = String(query.segment || "all");
@@ -748,6 +862,12 @@ export async function productUsers(query = {}, newsletterByEmail = new Map()) {
   });
   const sorters = { recent: (a, b) => (asDate(b.lastActiveAt) || asDate(b.lastLoginAt) || 0) - (asDate(a.lastActiveAt) || asDate(a.lastLoginAt) || 0), joined: (a, b) => (asDate(b.joinedAt) || 0) - (asDate(a.joinedAt) || 0), jobs: (a, b) => b.completedJobs - a.completedJobs, credits: (a, b) => asNumber(a.availableCredits, -1) - asNumber(b.availableCredits, -1) };
   rows.sort(sorters[String(query.sort || "recent")] || sorters.recent);
+  // Signed-out visitors join the same list so they sort, filter and paginate
+  // alongside accounts instead of existing only as a headcount.
+  if (String(query.identity || "all") !== "accounts") {
+    rows = rows.concat(anonymousVisitorRows(indexed, range));
+    rows.sort(sorters[String(query.sort || "recent")] || sorters.recent);
+  }
   const { page, pageSize } = pageOptions(query); const total = rows.length; const offset = (page - 1) * pageSize;
   const segmentCounts = {}; for (const row of rows) for (const item of row.segments) segmentCounts[item] = (segmentCounts[item] || 0) + 1;
   return { asOf: range.now, coverage: { behavior: "Successful authentication and credited tool activity", newsletter: newsletterByEmail.size ? "connected" : "unavailable" }, summary: { users: total, segmentCounts }, facets, items: rows.slice(offset, offset + pageSize), pagination: { page, pageSize, total, pages: Math.max(1, Math.ceil(total / pageSize)) } };
