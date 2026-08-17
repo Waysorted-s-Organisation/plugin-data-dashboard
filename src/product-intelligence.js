@@ -87,6 +87,11 @@ export const PASSIVE_EVENT_TYPES = [
   "identity_linked",
   "analytics_transport_updated",
   "user_notification_shown",
+  // Emitted by the sign-in poller's own timer once an attempt passes forty
+  // seconds, not by anything the user did. It belongs in the auth funnel, but
+  // counting it as activity would credit an active day to someone who clicked
+  // once and then sat still.
+  "auth_pending_slow",
 ];
 
 /**
