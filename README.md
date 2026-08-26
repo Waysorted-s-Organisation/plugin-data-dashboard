@@ -119,7 +119,7 @@ Never written: the **Activity Log** tab (outreach notes are written by people) a
 `integrations/waysorted-sheet-sync.gs` runs inside the spreadsheet's own Apps Script project. Apps Script rather than a service account on purpose: it already runs as the sheet's owner, so there is no Google Cloud project to create, no key file to download, and no long-lived credential in this repository or in a deployment environment. The only secret is the dashboard's own Basic Auth password, held in the script's properties.
 
 1. Extensions → Apps Script, paste the file, save.
-2. Project Settings → Script Properties, add `DASHBOARD_URL`, `DASHBOARD_USER`, `DASHBOARD_PASS`.
+2. Project Settings → Script Properties, add `DASHBOARD_URL`, `DASHBOARD_USER`, `DASHBOARD_PASS`, and press **Save script properties**. `DASHBOARD_USER`/`DASHBOARD_PASS` are the values of `DASHBOARD_BASIC_AUTH_USER`/`DASHBOARD_BASIC_AUTH_PASS` from the deployment. Run `showScriptProperties` if a name is rejected — it lists what is actually saved, and the character count of each value, without printing the password.
 3. Run `removePlaceholderRows` once to clear the shipped Alice/Bob rows.
 4. Run `syncUsersSheet` once to backfill.
 5. Run `installDailyTrigger` once for the 06:00 daily run.
