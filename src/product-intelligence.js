@@ -36,6 +36,40 @@ import {
 
 const id = (value) => value === null || value === undefined ? null : String(value);
 const lowCreditThreshold = () => Math.max(0, asNumber(process.env.CREDIT_LOW_THRESHOLD, 20));
+
+/**
+ * Subscription states that mean money has changed hands, or is committed to.
+ *
+ * `past_due` and `grace` are included deliberately: the person paid before and
+ * has not been cut off, which is a customer with a billing problem, not a
+ * stranger.
+ */
+const COMMERCIAL_SUBSCRIPTION_STATUSES = new Set(["active", "cancel_scheduled", "trialing", "past_due", "grace"]);
+const DEAD_SUBSCRIPTION_STATUSES = new Set(["cancelled", "canceled", "expired", "payment_pending", "failed", "refunded", "created"]);
+
+/**
+ * A subscription that currently entitles the user to something.
+ *
+ * The `subscriptions` collection was loaded, indexed and returned on the
+ * profile, but nothing ever read it to decide commercial standing — that came
+ * only from the wallet's own `subscriptionStatus`. A subscription granted
+ * directly in the backend writes a subscription record without necessarily
+ * initialising a wallet, so a real paying — or comped — subscriber rendered
+ * byte-for-byte identically to someone who had never opened a checkout: no
+ * wallet, no plan, stage "activated".
+ *
+ * An unexpired period is treated as substantive on its own, because a hand-made
+ * record can carry a status string this dashboard has never seen.
+ */
+function activeSubscription(rows = [], now = new Date()) {
+  return rows.find((row) => {
+    const status = String(row.status || "").toLowerCase();
+    if (COMMERCIAL_SUBSCRIPTION_STATUSES.has(status)) return true;
+    if (DEAD_SUBSCRIPTION_STATUSES.has(status)) return false;
+    const end = asDate(row.currentPeriodEnd);
+    return Boolean(end && end > now);
+  }) || null;
+}
 export const SEMANTIC_EVENT_TYPES = ["plugin_session_started", "plugin_session_ended", "tool_opened", "tool_closed", "tool_action_started", "tool_action_completed", "tool_action_failed", "feature_used", "active_tool_time", "favorite_changed", "billing_cta_viewed", "billing_cta_clicked", "user_facing_error_displayed", "feedback_submitted"];
 
 /**
@@ -67,6 +101,38 @@ function dayKeyFormatter(timezone) {
 }
 
 const looksLikeEmail = (value) => typeof value === "string" && value.includes("@");
+
+/**
+ * Placeholders the ingest writes when the plugin sends no identifier.
+ *
+ * `src/server.js` substitutes the literal strings "unknown-device" and
+ * "unknown-session" so a document always has the field. They are not
+ * identities: treating them as one merges every device that failed to report
+ * itself into a single "visitor", and — worse — an identity_linked event
+ * carrying no device id would map the sentinel to a real account, dragging
+ * every unattributed device's activity onto that one person.
+ */
+const ANONYMOUS_SENTINELS = new Set(["unknown-device", "unknown-session", "unknown", "null", "undefined"]);
+
+const anonymousKey = (value) => {
+  const text = String(value ?? "").trim();
+  return text && !ANONYMOUS_SENTINELS.has(text.toLowerCase()) ? text : null;
+};
+
+/**
+ * The account an unidentified event belongs to, if any.
+ *
+ * Session first, pseudonymous id second. The session is the stronger evidence
+ * and the only one that works under a hard login gate, where the anonymous
+ * events are the head of an authenticated launch rather than a separate
+ * signed-out life. The anonymous id still answers the genuine case: someone who
+ * used the plugin signed out and later created an account.
+ */
+function resolveAnonymous(sessionId, anonymous, sessionLinks, identityLinks) {
+  const session = anonymousKey(sessionId);
+  if (session && sessionLinks?.has(session)) return sessionLinks.get(session);
+  return (anonymous && identityLinks?.get(anonymous)) || null;
+}
 
 /**
  * Events the plugin emits on its own, without the user doing anything.
@@ -153,7 +219,8 @@ async function identityLinksByAnonymousId() {
             // The device the link happened on. Anonymous activity is keyed by
             // device, so the link has to be findable by device too — the
             // pseudonymous id in the payload is only one of the two identities
-            // a device produces.
+            // a device produces. Both are launch-scoped in practice, which is
+            // why accountsBySessionId exists alongside this.
             deviceIds: { $addToSet: "$deviceId" },
           },
         },
@@ -167,9 +234,11 @@ async function identityLinksByAnonymousId() {
       // the read side resolves it against a real user record.
       if (!userId && !email) continue;
       const account = userId || email;
-      if (row._id) links.set(String(row._id), account);
+      const anonymous = anonymousKey(row._id);
+      if (anonymous) links.set(anonymous, account);
       for (const deviceId of row.deviceIds || []) {
-        if (deviceId) links.set(String(deviceId), account);
+        const device = anonymousKey(deviceId);
+        if (device) links.set(device, account);
       }
     }
   } catch (error) {
@@ -179,7 +248,85 @@ async function identityLinksByAnonymousId() {
   return links;
 }
 
-async function pluginActivityDaysByIdentity(start, end, identityLinks = new Map()) {
+/**
+ * The account that signed in during each plugin session.
+ *
+ * The plugin requires a login before any tool can be used, yet the users table
+ * was full of "signed-out visitor" rows doing real work in real tools. They are
+ * not signed-out people: they are the opening seconds of a signed-in person's
+ * session. Events start flowing at plugin boot, before the stored token has
+ * been validated and the user object populated, so the first events of every
+ * launch carry no identity. Nothing stitched them to the account, so every
+ * launch also produced a phantom visitor.
+ *
+ * identity_linked cannot cover this. It fires on a signed-out session SIGNING
+ * IN, which under a hard login gate never happens — the person is already
+ * authenticated, the events merely precede the plugin knowing it.
+ *
+ * The session id can cover it, and is the strongest join available: it is
+ * written on every event, it is scoped to one launch on one machine, and if any
+ * event in it carries an account then every event in it belongs to that
+ * account. A session carrying two different accounts is left unresolved rather
+ * than guessed at.
+ *
+ * Built over ALL time, like the anonymous-id links, so a July window still
+ * resolves a March session.
+ */
+async function accountsBySessionId() {
+  const links = new Map();
+  try {
+    const collection = await getEventsCollection();
+    const rows = await collection
+      .aggregate([
+        {
+          $match: {
+            $or: [
+              { "user.userId": { $nin: [null, ""] } },
+              { "user.email": { $nin: [null, ""] } },
+              { eventType: "identity_linked" },
+            ],
+          },
+        },
+        {
+          $group: {
+            _id: "$sessionId",
+            // identity_linked carries the account in its payload rather than in
+            // user, so both places are read.
+            userIds: { $addToSet: "$user.userId" },
+            emails: { $addToSet: "$user.email" },
+            linkedUserIds: { $addToSet: "$payload.userId" },
+            linkedEmails: { $addToSet: "$payload.email" },
+          },
+        },
+      ])
+      .toArray();
+
+    for (const row of rows) {
+      const session = anonymousKey(row._id);
+      if (!session) continue;
+      const candidates = [...(row.userIds || []), ...(row.linkedUserIds || []), ...(row.emails || []), ...(row.linkedEmails || [])]
+        .filter(Boolean)
+        .map(String);
+      // Events written before the identity fix store an email in user.userId,
+      // so the two are separated by shape rather than by field.
+      const accountIds = [...new Set(candidates.filter((value) => !looksLikeEmail(value)))];
+      const emails = [...new Set(candidates.filter(looksLikeEmail).map((value) => value.toLowerCase()))];
+      // Two accounts in one session means someone switched users mid-launch.
+      // Attributing the whole session to either one would move the other's work
+      // onto the wrong person, so it is left anonymous instead.
+      if (accountIds.length > 1) continue;
+      if (!accountIds.length && emails.length > 1) continue;
+      const account = accountIds[0] || emails[0] || null;
+      if (account) links.set(session, account);
+    }
+  } catch (error) {
+    // Losing the links degrades attribution; it must not break the page.
+    console.error("Session identity aggregation failed:", error?.message || error);
+  }
+  return links;
+}
+
+async function pluginActivityDaysByIdentity(start, end, identityLinks = new Map(), sessionLinks = new Map()) {
   const timezone = reportingTimezone();
   const byUserId = new Map();
   const byEmail = new Map();
@@ -195,31 +342,49 @@ async function pluginActivityDaysByIdentity(start, end, identityLinks = new Map(
     const collection = await getEventsCollection();
     const rows = await collection
       .aggregate([
-        { $match: { eventAt: { $gte: start, $lte: end }, eventType: { $nin: PASSIVE_EVENT_TYPES } } },
+        // Half-open, matching `inRange`. With an inclusive upper bound an event
+        // landing exactly on a period boundary was counted in the previous
+        // window AND the current one, biasing every change percentage measured
+        // between them.
+        { $match: { eventAt: { $gte: start, $lt: end }, eventType: { $nin: PASSIVE_EVENT_TYPES } } },
         {
           $group: {
             _id: {
-              identity: { $ifNull: ["$user.userId", "$user.email"] },
+              // Email first, account id second.
+              //
+              // Keying on the account id first stranded anyone whose id does
+              // not join: the plugin's user.userId is whatever the plugin
+              // believes the account is, and when that is not the backend
+              // users._id the row was filed under a key nothing resolves — even
+              // when the very same event carried a perfectly good email. Email
+              // also converges the two eras of stored events, since rows
+              // written before the identity fix hold an email IN user.userId.
+              identity: { $ifNull: ["$user.email", "$user.userId"] },
               // Carried so a signed-out visitor can be shown by the name Figma
               // gives them, which is how they are recognisable to the owner.
               name: "$user.name",
-              // Falls back to the device so a signed-out visitor is still
-              // counted once even when an older event carries no pseudonymous id.
-              // The device is the anchor, not the pseudonymous id. The plugin
-              // derives that id from the Figma account when it can read it and
-              // from the device otherwise, and it flips between the two within
-              // a single session — so one person on one machine produced two
-              // identities, was counted twice, and had their history split so
-              // neither half looked like a return. The device id is written on
-              // every event and is stable per install.
+              // Keys a visitor who never signs in. The device id is preferred
+              // over the pseudonymous id because the plugin flips the latter
+              // between a Figma-derived value and a device-derived one within a
+              // single session, splitting one person into two.
+              //
+              // Neither is stable across launches: production device ids arrive
+              // as `device_<epoch-ms>_<suffix>` whose timestamp is the launch
+              // that minted them, so this key identifies a LAUNCH. That is
+              // corrected for anyone who signs in — the session link above
+              // moves their whole launch onto the account — and reported as a
+              // measurement limit for those who never do. See identityHealth.
               anonymous: { $ifNull: ["$deviceId", "$user.anonymousId"] },
+              // Carried so the opening, pre-authentication events of a launch
+              // can be resolved to whoever the session turned out to belong to.
+              session: "$sessionId",
               day: { $dateToString: { date: "$eventAt", format: "%Y-%m-%d", timezone } },
             },
           },
         },
         {
           $group: {
-            _id: { identity: "$_id.identity", anonymous: "$_id.anonymous" },
+            _id: { identity: "$_id.identity", anonymous: "$_id.anonymous", session: "$_id.session" },
             days: { $addToSet: "$_id.day" },
             latestName: { $last: "$_id.name" },
           },
@@ -229,10 +394,12 @@ async function pluginActivityDaysByIdentity(start, end, identityLinks = new Map(
 
     for (const row of rows) {
       const identity = row._id?.identity;
-      const anonymous = row._id?.anonymous;
-      // A signed-out row is routed to the account it was later linked to, so
-      // pre-signup history lands with the person rather than beside them.
-      const linked = identity ? null : identityLinks.get(String(anonymous || ""));
+      const anonymous = anonymousKey(row._id?.anonymous);
+      // An unidentified row is routed to the account it belongs to. The session
+      // is tried first: under a hard login gate almost every anonymous row is
+      // the pre-authentication head of a signed-in session, and the session id
+      // is the only key that survives a device id minted fresh at each launch.
+      const linked = identity ? null : resolveAnonymous(row._id?.session, anonymous, sessionLinks, identityLinks);
       const resolved = identity || linked || null;
       const target = !resolved ? byAnonymous : looksLikeEmail(resolved) ? byEmail : byUserId;
       const rawKey = resolved || anonymous;
@@ -259,24 +426,126 @@ async function pluginActivityDaysByIdentity(start, end, identityLinks = new Map(
 }
 
 /**
- * The tool each identity used most, derived from plugin activity.
+ * Sessions in which the user actually opened each tool.
  *
- * The users table's top-tool column was built purely from credit-charged
- * reservations, so a tool that charges nothing could never appear there and its
- * users read as having used nothing at all. Telemetry knows what they actually
- * opened, whether or not it billed them.
+ * Opening the plugin starts a fleet of background services — sync, credit
+ * refresh, license checks, prefetch — and they report themselves the same way a
+ * user's run does, with a `tool_action_completed` carrying whatever surface the
+ * plugin happens to be on. Counting those made every launch look like finished
+ * work, so the job column measured how often people opened the plugin rather
+ * than how much they got done.
+ *
+ * The distinguishing fact is not in the event's name — it is that nobody opened
+ * the tool. A person has to open a tool to run it; a background service does
+ * not. So a completion counts only when the same session shows a `tool_opened`
+ * for that same tool at or before it.
+ *
+ * Deliberately not a list of background action names: those are the plugin's
+ * internal vocabulary, they change without notice, and guessing them wrong
+ * silently deletes real work. This rule reads only what is already recorded.
+ *
+ * Two escape hatches keep the rule from over-deleting:
+ *   - A tool that emits no `tool_opened` ANYWHERE in the window cannot be
+ *     judged by this rule, so its completions are all counted and the tool is
+ *     named as ungated.
+ *   - Opens are looked up from twelve hours before the window, so a session
+ *     straddling the period boundary does not lose the open that justifies its
+ *     completions.
  */
-async function pluginTopToolByIdentity(start, end, identityLinks = new Map()) {
-  const byUserId = new Map();
-  const byEmail = new Map();
-  const byAnonymous = new Map();
+const SESSION_LOOKBEHIND_MS = 12 * 60 * 60 * 1000;
+
+async function toolOpensBySessionTool(start, end) {
+  const opens = new Map();
+  const toolsWithOpens = new Set();
   try {
     const collection = await getEventsCollection();
     const rows = await collection
       .aggregate([
         {
           $match: {
-            eventAt: { $gte: start, $lte: end },
+            eventType: "tool_opened",
+            eventAt: { $gte: new Date(start.getTime() - SESSION_LOOKBEHIND_MS), $lt: end },
+          },
+        },
+        { $group: { _id: { session: "$sessionId", tool: "$tool" }, firstOpenAt: { $min: "$eventAt" } } },
+      ])
+      .toArray();
+    for (const row of rows) {
+      const tool = String(row._id?.tool || "").trim().toLowerCase();
+      if (!tool) continue;
+      toolsWithOpens.add(tool);
+      const session = anonymousKey(row._id?.session);
+      const openedAt = asDate(row.firstOpenAt);
+      if (!session || !openedAt) continue;
+      opens.set(`${session}|${tool}`, openedAt);
+    }
+  } catch (error) {
+    // Without this index every completion is counted, which is the behaviour
+    // that existed before the rule. Degrading to "count everything" is the
+    // right failure: it over-reports rather than deleting real work.
+    console.error("Tool-open index failed:", error?.message || error);
+  }
+  return { opens, toolsWithOpens };
+}
+
+/**
+ * Completions in one session-and-tool group that a person actually asked for.
+ *
+ * Returns the counted total and the number set aside as background, so the
+ * amount being filtered is reportable rather than invisible.
+ */
+function countUserInitiated(completions, sessionId, rawTool, openIndex) {
+  const finished = completions.map(asDate).filter(Boolean);
+  if (!finished.length) return { jobs: 0, background: 0, ungated: 0 };
+  // Nothing to compare against for this tool, so the rule does not apply.
+  if (!openIndex.toolsWithOpens.has(rawTool)) return { jobs: finished.length, background: 0, ungated: finished.length };
+  const session = anonymousKey(sessionId);
+  const openedAt = session ? openIndex.opens.get(`${session}|${rawTool}`) : null;
+  if (!openedAt) return { jobs: 0, background: finished.length, ungated: 0 };
+  const jobs = finished.filter((at) => at >= openedAt).length;
+  return { jobs, background: finished.length - jobs, ungated: 0 };
+}
+
+/**
+ * What each identity did with tools, derived from plugin activity.
+ *
+ * Two answers come out of one aggregation pass, because they need the same
+ * grouping: which tool the identity touched most recently, and how many tool
+ * jobs they actually finished.
+ *
+ * The users table's top-tool column was built purely from credit-charged
+ * reservations, so a tool that charges nothing could never appear there and its
+ * users read as having used nothing at all. Telemetry knows what they actually
+ * opened, whether or not it billed them.
+ *
+ * The job count exists for the same reason one column to the left. "Credited
+ * jobs" counts committed reservations, so a person whose run never produced one
+ * — the tool did not bill, the hold is still open, the reservation lost its
+ * user link — reads as zero jobs beside a tool they demonstrably used. Completed
+ * tool actions give that row a number backed by evidence.
+ *
+ * The two counts are returned separately and must never be summed: a credited
+ * run emits a committed reservation AND a tool_action_completed, so adding them
+ * would count one job twice.
+ */
+async function pluginToolUseByIdentity(start, end, identityLinks = new Map(), sessionLinks = new Map()) {
+  const top = { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map() };
+  const counts = { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map() };
+  let available = true;
+  let backgroundCompletions = 0;
+  const ungatedTools = new Set();
+  try {
+    const collection = await getEventsCollection();
+    // Resolved per (session, tool) rather than inside the grouping below,
+    // because the two are not aligned: the head of a launch is unidentified and
+    // the tail is not, so an open and the completion it justifies can land in
+    // different identity groups for the same session.
+    const openIndex = await toolOpensBySessionTool(start, end);
+    const rows = await collection
+      .aggregate([
+        {
+          $match: {
+            eventAt: { $gte: start, $lt: end },
             eventType: { $nin: PASSIVE_EVENT_TYPES },
             tool: { $nin: [null, "", "unknown"] },
           },
@@ -284,18 +553,40 @@ async function pluginTopToolByIdentity(start, end, identityLinks = new Map()) {
         {
           $group: {
             _id: {
-              identity: { $ifNull: ["$user.userId", "$user.email"] },
-              // The device is the anchor, not the pseudonymous id. The plugin
-              // derives that id from the Figma account when it can read it and
-              // from the device otherwise, and it flips between the two within
-              // a single session — so one person on one machine produced two
-              // identities, was counted twice, and had their history split so
-              // neither half looked like a return. The device id is written on
-              // every event and is stable per install.
+              // Email first, account id second.
+              //
+              // Keying on the account id first stranded anyone whose id does
+              // not join: the plugin's user.userId is whatever the plugin
+              // believes the account is, and when that is not the backend
+              // users._id the row was filed under a key nothing resolves — even
+              // when the very same event carried a perfectly good email. Email
+              // also converges the two eras of stored events, since rows
+              // written before the identity fix hold an email IN user.userId.
+              identity: { $ifNull: ["$user.email", "$user.userId"] },
+              // Preferred over the pseudonymous id, which flips between a
+              // Figma-derived and a device-derived value inside one session.
+              // Not stable across launches either — see the note in
+              // pluginActivityDaysByIdentity and identityHealth.
               anonymous: { $ifNull: ["$deviceId", "$user.anonymousId"] },
+              // Carried so the opening, pre-authentication events of a launch
+              // can be resolved to whoever the session turned out to belong to.
+              session: "$sessionId",
               tool: "$tool",
             },
             events: { $sum: 1 },
+            // A job is a run that FINISHED. tool_action_completed is the only
+            // event that says so, so it is the only one counted.
+            //
+            // feature_used is deliberately not counted and not substituted: it
+            // marks that a feature was invoked, not that the work it started
+            // ever finished, and a tool can emit several per run. Tallied only
+            // so a tool that reports invocations but never reports a completion
+            // can be named as an instrumentation gap rather than silently
+            // reporting zero jobs.
+            // Timestamps rather than a count, because whether each one counts
+            // depends on when the user opened the tool.
+            completionsAt: { $push: { $cond: [{ $eq: ["$eventType", "tool_action_completed"] }, "$eventAt", "$$REMOVE"] } },
+            featureUses: { $sum: { $cond: [{ $eq: ["$eventType", "feature_used"] }, 1, 0] } },
             lastEventAt: { $max: "$eventAt" },
           },
         },
@@ -310,22 +601,22 @@ async function pluginTopToolByIdentity(start, end, identityLinks = new Map()) {
       if (NON_TOOL_SURFACES.has(normalized.key)) continue;
 
       const identity = row._id?.identity;
-      const anonymous = row._id?.anonymous;
-      // A signed-out row is routed to the account it was later linked to, so
-      // pre-signup history lands with the person rather than beside them.
-      const linked = identity ? null : identityLinks.get(String(anonymous || ""));
+      const anonymous = anonymousKey(row._id?.anonymous);
+      // See pluginActivityDaysByIdentity: the session resolves the head of a
+      // launch, the anonymous id resolves a genuine signed-out-then-signed-up.
+      const linked = identity ? null : resolveAnonymous(row._id?.session, anonymous, sessionLinks, identityLinks);
       const resolved = identity || linked || null;
-      const target = !resolved ? byAnonymous : looksLikeEmail(resolved) ? byEmail : byUserId;
+      const bucket = !resolved ? "byAnonymous" : looksLikeEmail(resolved) ? "byEmail" : "byUserId";
       const rawKey = resolved || anonymous;
       if (!rawKey) continue;
       const key = looksLikeEmail(rawKey) ? String(rawKey).toLowerCase() : String(rawKey);
 
-      const existing = target.get(key);
+      const existing = top[bucket].get(key);
       // Rows arrive newest-first, so the first one for an identity is the tool
       // they most recently used.
       const lastEventAt = asDate(row.lastEventAt);
       if (!existing || (lastEventAt && lastEventAt > existing.lastEventAt)) {
-        target.set(key, {
+        top[bucket].set(key, {
           key: normalized.key,
           label: normalized.label,
           events: asNumber(row.events),
@@ -333,18 +624,99 @@ async function pluginTopToolByIdentity(start, end, identityLinks = new Map()) {
           lastEventAt: asDate(row.lastEventAt),
         });
       }
+
+      // Job evidence is accumulated across every tool the identity used, not
+      // just the top one — the column answers "how much work did this person
+      // get done", which is not a per-tool question.
+      const rawTool = String(row._id?.tool || "").trim().toLowerCase();
+      const initiated = countUserInitiated(row.completionsAt || [], row._id?.session, rawTool, openIndex);
+      backgroundCompletions += initiated.background;
+      if (initiated.ungated) ungatedTools.add(normalized.key);
+      const tally = counts[bucket].get(key) || { completedActions: 0, featureUses: 0 };
+      tally.completedActions += initiated.jobs;
+      tally.featureUses += asNumber(row.featureUses);
+      counts[bucket].set(key, tally);
     }
   } catch (error) {
     // A ReferenceError here previously looked identical to an unreachable
     // database: the map came back empty and every caller treated that as
     // "this user has used nothing".
+    available = false;
     console.error(
       error instanceof ReferenceError || error instanceof TypeError
-        ? `Plugin top-tool aggregation has a bug: ${error?.stack || error}`
-        : `Plugin top-tool aggregation failed: ${error?.message || error}`
+        ? `Plugin tool-use aggregation has a bug: ${error?.stack || error}`
+        : `Plugin tool-use aggregation failed: ${error?.message || error}`
     );
   }
-  return { byUserId, byEmail, byAnonymous };
+
+  const jobs = { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map() };
+  for (const bucket of ["byUserId", "byEmail", "byAnonymous"]) {
+    for (const [key, tally] of counts[bucket]) {
+      jobs[bucket].set(key, tally.completedActions);
+    }
+  }
+  return { top, jobs, available, backgroundCompletions, ungatedTools: [...ungatedTools] };
+}
+
+/**
+ * Whether plugin identities are stable enough to count people with.
+ *
+ * The read path assumed the device id was minted once per install. Production
+ * shows otherwise: ids arrive as `device_<epoch-ms>_<suffix>` whose embedded
+ * timestamp matches the first event of the launch that produced them, so the
+ * plugin mints a new one every time it opens and never persists it. A device id
+ * therefore identifies a LAUNCH, not a machine, and every launch by the same
+ * signed-out person becomes another "visitor".
+ *
+ * Session stitching removes that error for anyone who signs in, which under a
+ * hard login gate is nearly everyone. What remains is a real measurement limit
+ * on genuinely signed-out traffic, and it should be stated rather than quietly
+ * inflating a headcount. The ratio of distinct devices to distinct sessions is
+ * the test: at one device per install it sits far below one, and at one device
+ * per launch it sits at one.
+ */
+async function identityHealth(start) {
+  try {
+    const collection = await getEventsCollection();
+    const [row] = await collection
+      .aggregate([
+        { $match: { eventAt: { $gte: start } } },
+        {
+          $group: {
+            _id: null,
+            devices: { $addToSet: "$deviceId" },
+            sessions: { $addToSet: "$sessionId" },
+            accounts: { $addToSet: "$user.userId" },
+          },
+        },
+        {
+          $project: {
+            devices: { $size: "$devices" },
+            sessions: { $size: "$sessions" },
+            accounts: { $size: { $filter: { input: "$accounts", cond: { $ne: ["$$this", null] } } } },
+          },
+        },
+      ])
+      .toArray();
+    if (!row || !row.sessions) return { status: "unavailable", message: "No plugin events in range to assess identity stability." };
+    const devicesPerSession = Math.round((row.devices / row.sessions) * 100) / 100;
+    // A shared install produces many sessions per device. One device per
+    // session means the id is regenerated at launch and cannot identify anyone
+    // across launches.
+    const stable = devicesPerSession < 0.75;
+    return {
+      status: stable ? "stable" : "per_launch",
+      devices: row.devices,
+      sessions: row.sessions,
+      accounts: row.accounts,
+      devicesPerSession,
+      message: stable
+        ? "Plugin device ids persist across launches, so signed-out visitors are counted once each."
+        : "The plugin mints a new device id on every launch, so it identifies a launch rather than a machine. Signed-out visitors who never sign in are counted once per launch and cannot be de-duplicated. Signed-in users are unaffected: their activity is stitched to the account through the session id. Fix by persisting the device id in figma.clientStorage.",
+    };
+  } catch (error) {
+    return { status: "unavailable", message: `Identity stability could not be assessed: ${error?.message || error}` };
+  }
 }
 
 async function telemetryHealth(now = new Date()) {
@@ -470,22 +842,36 @@ async function loadCoreUncached(range = null) {
   // needed on read.
   // Resolved once and shared: every aggregation below must agree about which
   // pseudonymous ids belong to which accounts, or a user's history splits.
-  const identityLinks = await identityLinksByAnonymousId();
-  const [pluginActivity, pluginActivityCurrent, pluginActivityPrevious, pluginTopTools] = await Promise.all([
+  const [identityLinks, sessionLinks] = await Promise.all([
+    identityLinksByAnonymousId(),
+    accountsBySessionId(),
+  ]);
+  const lookbackStart = new Date(Date.now() - lookbackDays * DAY_MS);
+  const [pluginActivity, pluginActivityCurrent, pluginActivityPrevious, pluginToolUseLifetime, pluginToolUseCurrent, pluginToolUsePrevious] = await Promise.all([
     // Wide index: cohort retention measures each user's return relative to
     // their own signup date, so it needs history beyond any single window.
-    pluginActivityDaysByIdentity(new Date(Date.now() - lookbackDays * DAY_MS), new Date(), identityLinks),
+    pluginActivityDaysByIdentity(lookbackStart, new Date(), identityLinks, sessionLinks),
     range
-      ? pluginActivityDaysByIdentity(range.currentStart, range.now, identityLinks)
+      ? pluginActivityDaysByIdentity(range.currentStart, range.now, identityLinks, sessionLinks)
       : Promise.resolve(null),
     range
-      ? pluginActivityDaysByIdentity(range.previousStart, range.currentStart, identityLinks)
+      ? pluginActivityDaysByIdentity(range.previousStart, range.currentStart, identityLinks, sessionLinks)
       : Promise.resolve(null),
-    pluginTopToolByIdentity(
-      range ? range.currentStart : new Date(Date.now() - lookbackDays * DAY_MS),
-      range ? range.now : new Date(),
-      identityLinks
-    ),
+    // Tool use is indexed over both spans for the same reason activity is. The
+    // users table reports credited jobs over a user's whole history while the
+    // top-tool column was window-scoped, so anyone whose last tool use predated
+    // the selected range read as "No tool use recorded" beside a non-zero
+    // lifetime job count — one row describing two different periods.
+    pluginToolUseByIdentity(lookbackStart, new Date(), identityLinks, sessionLinks),
+    range
+      ? pluginToolUseByIdentity(range.currentStart, range.now, identityLinks, sessionLinks)
+      : Promise.resolve(null),
+    // The previous window needs its own index for the same reason activity
+    // does: every "what changed" percentage is measured against it, so it must
+    // be built on the same clock rather than reused from another span.
+    range
+      ? pluginToolUseByIdentity(range.previousStart, range.currentStart, identityLinks, sessionLinks)
+      : Promise.resolve(null),
   ]);
 
   return {
@@ -493,11 +879,16 @@ async function loadCoreUncached(range = null) {
     pluginActivity,
     pluginActivityCurrent: pluginActivityCurrent || pluginActivity,
     pluginActivityPrevious: pluginActivityPrevious || pluginActivity,
-    pluginTopTools,
+    pluginToolUse: pluginToolUseCurrent || pluginToolUseLifetime,
+    pluginToolUsePrevious: pluginToolUsePrevious || pluginToolUseLifetime,
+    pluginToolUseLifetime,
   };
 }
 
+const emptyIdentityMaps = () => ({ byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map() });
+
 function indexCore(core) {
+  const emptyToolUse = { top: emptyIdentityMaps(), jobs: emptyIdentityMaps() };
   const group = (rows, field = "user") => {
     const map = new Map();
     for (const row of rows) {
@@ -513,7 +904,13 @@ function indexCore(core) {
     // index. The wide index is kept separately for cohort retention, which
     // measures each user against their own signup date rather than a window.
     pluginActivity: core.pluginActivityCurrent || core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), namesByAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") },
-    pluginTopTools: core.pluginTopTools || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map() },
+    pluginTopTools: core.pluginToolUse?.top || emptyToolUse.top,
+    pluginToolJobs: core.pluginToolUse?.jobs || emptyToolUse.jobs,
+    // Lifetime tool use answers the two lifetime columns — latest tool and
+    // total jobs — so they no longer disagree with each other about the period.
+    pluginTopToolsLifetime: core.pluginToolUseLifetime?.top || core.pluginToolUse?.top || emptyToolUse.top,
+    pluginToolJobsLifetime: core.pluginToolUseLifetime?.jobs || core.pluginToolUse?.jobs || emptyToolUse.jobs,
+    pluginToolUseAvailable: (core.pluginToolUseLifetime?.available ?? true) && (core.pluginToolUse?.available ?? true),
     pluginActivityLifetime: core.pluginActivity || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map(), namesByAnonymous: new Map(), available: false, timezone: "UTC", formatDay: dayKeyFormatter("UTC") },
     billing: new Map(core.billings.map((row) => [id(row.user), row])),
     sessions: group(core.sessions), reservations: group(core.reservations), ledgers: group(core.ledgers),
@@ -529,6 +926,8 @@ function userFacts(user, indexed, range) {
   const committed = reservations.filter((row) => row.status === "committed" && !indexed.compensatedReservations.has(id(row._id)));
   const purchases = indexed.purchases.get(userId) || [];
   const billing = indexed.billing.get(userId) || null;
+  const subscriptions = indexed.subscriptions.get(userId) || [];
+  const subscription = activeSubscription(subscriptions, range.now);
   const currentSessions = sessions.filter((row) => inRange(loginAt(row), range.currentStart, range.now));
   const currentCommitted = committed.filter((row) => inRange(reservationAt(row), range.currentStart, range.now));
   // Active days combine backend logins with plugin activity, bucketed in the
@@ -566,7 +965,11 @@ function userFacts(user, indexed, range) {
   // False when the analytics store could not be read. Verdicts that depend on
   // plugin evidence must stay silent rather than assert a conclusion from data
   // that was never retrieved.
-  const activityAvailable = activity.available !== false && (indexed.pluginActivityLifetime?.available !== false);
+  // The tool-use aggregation is part of the same evidence: if it failed, a zero
+  // job count is "not measured", not "did nothing", and the table says so.
+  const activityAvailable = activity.available !== false
+    && (indexed.pluginActivityLifetime?.available !== false)
+    && indexed.pluginToolUseAvailable !== false;
   const lifetime = indexed.pluginActivityLifetime || activity;
   const lifetimePluginDays = new Set([
     ...(lifetime.byUserId.get(userId) || []),
@@ -588,14 +991,37 @@ function userFacts(user, indexed, range) {
   // the credited ranking above. Falling back to observed activity means the
   // column shows what the person actually used rather than implying they used
   // nothing. The `credited` flag lets the UI say which kind of evidence it is.
-  const observedTopTool =
-    indexed.pluginTopTools?.byUserId.get(userId) ||
-    indexed.pluginTopTools?.byEmail.get(String(user.email || "").toLowerCase()) ||
-    null;
+  //
+  // Read from the LIFETIME index. The credited columns beside this one are
+  // lifetime totals, so resolving the observed ones against the selected window
+  // made a single row describe two different periods: a user last seen in the
+  // plugin five weeks ago showed a non-zero lifetime job count next to "No tool
+  // use recorded". The in-range figures are resolved separately below.
+  const emailKey = String(user.email || "").toLowerCase();
+  // The two indexes hold DIFFERENT events, never the same one twice: each row
+  // is filed under its email when it has one and under its account id
+  // otherwise. So jobs are summed across both, while the top tool is whichever
+  // of the two happened later.
+  const sumIdentity = (maps) =>
+    asNumber(maps?.byUserId.get(userId), 0) + (emailKey ? asNumber(maps?.byEmail.get(emailKey), 0) : 0);
+  const latestIdentity = (maps) => {
+    const candidates = [maps?.byUserId.get(userId), emailKey ? maps?.byEmail.get(emailKey) : null].filter(Boolean);
+    return candidates.sort((a, b) => asDate(a.lastEventAt) - asDate(b.lastEventAt)).at(-1) || null;
+  };
+  const observedTopTool = latestIdentity(indexed.pluginTopToolsLifetime) || latestIdentity(indexed.pluginTopTools);
+  // Tool jobs the plugin observed — runs that actually finished, whether or not
+  // a reservation recorded them. Kept apart from the credited count rather than
+  // added to it: a credited run emits both a committed reservation and a
+  // completed tool action, so summing those two would report one job as two.
+  const observedJobs = sumIdentity(indexed.pluginToolJobsLifetime);
+  const observedJobsInRange = sumIdentity(indexed.pluginToolJobs);
   const activated = Boolean(firstCommitted || observedTopTool);
   if (!activated) segments.push("not_activated");
   if (activated) segments.push("activated");
-  if (currentCommitted.length >= 3) segments.push("engaged");
+  // Engagement is about how much work someone got done, not how much of it
+  // billed. Counting credited jobs alone left heavy users of a tool whose runs
+  // are only visible in telemetry out of the segment entirely.
+  if (Math.max(currentCommitted.length, observedJobsInRange) >= 3) segments.push("engaged");
   if (distinctDays.size >= 2) segments.push("returning");
   if (billing && asNumber(billing.availableCredits) <= lowCreditThreshold()) segments.push("low_credit");
   // at_risk and dormant are claims that a user has STOPPED, and plugin activity
@@ -644,7 +1070,7 @@ function userFacts(user, indexed, range) {
       : observedTopTool
         ? { ...observedTopTool, lastUsedAt: observedAt }
         : null;
-  return { userId, billing, sessions, reservations, committed, purchases, captured, currentSessions, currentCommitted, distinctDays, pluginActiveDays, activityAvailable, activated, lastActiveAt, lastActiveSource, lastLogin, lastLoginDate, firstCommitted, segments, topTool };
+  return { userId, billing, subscriptions, subscription, sessions, reservations, committed, purchases, captured, currentSessions, currentCommitted, distinctDays, pluginActiveDays, activityAvailable, activated, lastActiveAt, lastActiveSource, lastLogin, lastLoginDate, firstCommitted, segments, topTool, observedJobs, observedJobsInRange };
 }
 
 /**
@@ -673,7 +1099,10 @@ function resolveLifecycleStage(facts, billing) {
   const subscriptionStatus = String(billing?.subscriptionStatus || "");
   const hasPaidSubscription = ["active", "cancel_scheduled"].includes(subscriptionStatus);
   const hasPurchasedCredits = asNumber(billing?.lifetimePurchasedCredits) > 0;
-  if (facts.captured.length || hasPaidSubscription || hasPurchasedCredits) return "customer";
+  // facts.subscription is the subscriptions collection itself, which is where a
+  // subscription granted from the backend actually lands. Without it, a comped
+  // or hand-granted subscriber was invisible to every stage-based count.
+  if (facts.captured.length || hasPaidSubscription || hasPurchasedCredits || facts.subscription) return "customer";
   if (facts.activityAvailable && facts.distinctDays.size >= 2) return "returning";
   if (facts.activated) return "activated";
   // Reached checkout but no money is confirmed. Distinct from a user who never
@@ -686,7 +1115,7 @@ function resolveLifecycleStage(facts, billing) {
   return "signed_up";
 }
 
-function periodSummary(core, start, end, activityIndex = null) {
+function periodSummary(core, start, end, activityIndex = null, jobsIndex = null) {
   const sessions = core.sessions.filter(successfulSession).filter((row) => inRange(loginAt(row), start, end));
   const compensated = new Set(core.ledgers.filter((row) => row.reason === "compensation_credit").map((row) => id(row.reservation)).filter(Boolean));
   const reservations = core.reservations.filter((row) => row.status === "committed" && !compensated.has(id(row._id)) && inRange(reservationAt(row), start, end));
@@ -741,7 +1170,65 @@ function periodSummary(core, start, end, activityIndex = null) {
     const key = id(row.user); const occurredAt = reservationAt(row);
     if (!firstCommitByUser.has(key) || occurredAt < firstCommitByUser.get(key)) firstCommitByUser.set(key, occurredAt);
   }
-  const activated = [...firstCommitByUser.values()].filter((value) => value >= start && value < end).length;
+  // Activation is the first time a person got work done, not the first time
+  // they were billed for it. The users page has counted any tool use as
+  // activation since credit-free tools were measured; this metric had not
+  // caught up, so the summary and the table disagreed about the same word.
+  //
+  // Plugin evidence resolves to a calendar day rather than an instant, so a
+  // first activity is dated to the start of its day. That is only ever used to
+  // decide which window it falls in.
+  const lifetimeActivity = core.pluginActivity || activity;
+  const firstActivityByUser = new Map(firstCommitByUser);
+  const noteFirstActivity = (key, days) => {
+    if (!key || !days?.size) return;
+    const earliest = [...days].sort()[0];
+    if (!earliest) return;
+    const date = new Date(`${earliest}T00:00:00Z`);
+    const known = firstActivityByUser.get(key);
+    if (!known || date < known) firstActivityByUser.set(key, date);
+  };
+  for (const [userId, days] of lifetimeActivity.byUserId) {
+    if (knownUserIds.has(userId)) noteFirstActivity(userId, days);
+  }
+  for (const [email, days] of lifetimeActivity.byEmail) noteFirstActivity(emailToUserId.get(email), days);
+  const activated = [...firstActivityByUser.values()].filter((value) => value >= start && value < end).length;
+  // Completed work in this window, from both records of it.
+  //
+  // Committed reservations are the billing record; completed tool actions are
+  // what the plugin saw. Per account the two describe the SAME runs once a tool
+  // charges credits, so the larger is taken and never the sum. Accounts that
+  // appear in only one of them still contribute — which is the whole point:
+  // this metric used to be committed reservations alone and so missed every job
+  // whose reservation never landed.
+  const jobs = jobsIndex || { byUserId: new Map(), byEmail: new Map(), byAnonymous: new Map() };
+  const creditedByUser = new Map();
+  let unlinkedCreditedJobs = 0;
+  for (const row of reservations) {
+    const key = id(row.user);
+    // A reservation with no user link is still a job that happened. It cannot
+    // be de-duplicated against telemetry, so it is added on its own.
+    if (!key) { unlinkedCreditedJobs += 1; continue; }
+    creditedByUser.set(key, (creditedByUser.get(key) || 0) + 1);
+  }
+  const observedByUser = new Map();
+  const addObserved = (key, count) => {
+    if (!key || !count) return;
+    observedByUser.set(key, (observedByUser.get(key) || 0) + count);
+  };
+  for (const [userId, count] of jobs.byUserId) {
+    if (knownUserIds.has(userId)) addObserved(userId, count);
+  }
+  for (const [email, count] of jobs.byEmail) addObserved(emailToUserId.get(email), count);
+  let completedJobs = unlinkedCreditedJobs;
+  for (const key of new Set([...creditedByUser.keys(), ...observedByUser.keys()])) {
+    completedJobs += Math.max(creditedByUser.get(key) || 0, observedByUser.get(key) || 0);
+  }
+  // Work done by someone who never signed in. Counted here because the metric
+  // is "jobs completed", not "jobs completed by known accounts" — that
+  // distinction is carried by activeUsers/anonymousVisitors instead.
+  const anonymousJobs = [...(jobs.byAnonymous ? jobs.byAnonymous.values() : [])].reduce((sum, count) => sum + count, 0);
+  completedJobs += anonymousJobs;
   const captured = core.purchases.filter((row) => row.status === "captured" && inRange(row.capturedAt || row.updatedAt || row.createdAt, start, end));
   const refunds = core.refunds.filter((row) => row.status === "processed" && inRange(row.updatedAt || row.createdAt, start, end));
   return {
@@ -751,7 +1238,7 @@ function periodSummary(core, start, end, activityIndex = null) {
     returningUsers: [...daysByUser.values()].filter((days) => days.size >= 2).length,
     anonymousVisitors,
     returningAnonymousVisitors,
-    completedJobs: reservations.length,
+    completedJobs,
     creditsConsumed: reservations.reduce((sum, row) => sum + asNumber(row.creditsReserved), 0),
     grossRevenuePaise: captured.reduce((sum, row) => sum + asNumber(row.amountPaise), 0),
     refundsPaise: refunds.reduce((sum, row) => sum + asNumber(row.amountPaise), 0),
@@ -760,10 +1247,10 @@ function periodSummary(core, start, end, activityIndex = null) {
 
 export async function productSummary(days = 30) {
   const range = period(days); const core = await loadCore(range);
-  const current = periodSummary(core, range.currentStart, range.now, core.pluginActivityCurrent);
+  const current = periodSummary(core, range.currentStart, range.now, core.pluginActivityCurrent, core.pluginToolUse?.jobs);
   // The previous window ends where the current one begins, so the boundary day
   // belongs to the current period only.
-  const previous = periodSummary(core, range.previousStart, range.currentStart, core.pluginActivityPrevious);
+  const previous = periodSummary(core, range.previousStart, range.currentStart, core.pluginActivityPrevious, core.pluginToolUsePrevious?.jobs);
   const metrics = Object.fromEntries(Object.entries(current).map(([key, value]) => [key, { value, previous: previous[key], change: change(value, previous[key]) }]));
   metrics.netRevenuePaise = { value: current.grossRevenuePaise - current.refundsPaise, previous: previous.grossRevenuePaise - previous.refundsPaise, change: change(current.grossRevenuePaise - current.refundsPaise, previous.grossRevenuePaise - previous.refundsPaise) };
   const missingWallets = core.users.length - core.billings.length;
@@ -816,10 +1303,28 @@ export async function productSummary(days = 30) {
  * stitched onto the account, and listing them here too would count one person
  * twice.
  */
+/**
+ * Which record a job count came from.
+ *
+ * The larger of the two is taken, never the sum: once a tool charges credits a
+ * single run emits both a committed reservation and a completed tool action, so
+ * adding them would report one job as two. The larger is the best available
+ * lower bound on how many distinct runs there were, and preferring the credited
+ * count outright under-reported anyone whose billing lagged their work.
+ */
+function jobsSource(credited, observed) {
+  if (!credited && !observed) return null;
+  if (!credited) return "observed";
+  if (observed > credited) return "combined";
+  return "credited";
+}
+
 function anonymousVisitorRows(indexed, range) {
   const activity = indexed.pluginActivity;
   const lifetime = indexed.pluginActivityLifetime || activity;
-  const topTools = indexed.pluginTopTools || { byAnonymous: new Map() };
+  const topTools = indexed.pluginTopToolsLifetime || indexed.pluginTopTools || { byAnonymous: new Map() };
+  const jobsLifetime = indexed.pluginToolJobsLifetime || { byAnonymous: new Map() };
+  const jobsInWindow = indexed.pluginToolJobs || { byAnonymous: new Map() };
   const rows = [];
 
   for (const [anonymousId, days] of activity.byAnonymous) {
@@ -848,10 +1353,16 @@ function anonymousVisitorRows(indexed, range) {
       pluginActiveDays: days.size,
       activeDaysInRange: days.size,
       pluginActivityAvailable: activity.available !== false,
+      // A signed-out visitor has no wallet and so can never hold a reservation,
+      // but they still finish tool jobs. Reporting a hard 0 here said they did
+      // nothing; the observed count says what they actually did.
       creditedJobs: 0,
       creditedJobsInRange: 0,
-      completedJobs: 0,
-      jobsInRange: 0,
+      observedJobs: asNumber(jobsLifetime.byAnonymous?.get(anonymousId), 0),
+      observedJobsInRange: asNumber(jobsInWindow.byAnonymous?.get(anonymousId), 0),
+      completedJobs: asNumber(jobsLifetime.byAnonymous?.get(anonymousId), 0),
+      completedJobsSource: jobsLifetime.byAnonymous?.get(anonymousId) ? "observed" : null,
+      jobsInRange: asNumber(jobsInWindow.byAnonymous?.get(anonymousId), 0),
       topTool,
       toolKeys: topTool ? [topTool.key] : [],
       walletStatus: "not_applicable",
@@ -875,7 +1386,7 @@ export async function productUsers(query = {}, newsletterByEmail = new Map()) {
     const latestSource = facts.lastLogin?.source || null;
     const latestCountry = facts.lastLogin?.countryCode || billing?.pricingCountry || null;
     const newsletterProfile = newsletterByEmail.get(String(user.email || "").toLowerCase()) || null;
-    return { id: facts.userId, name: user.name || null, email: user.email || null, picture: user.picture || null, joinedAt: user.createdAt || null, segments: facts.segments, lifecycleStage: resolveLifecycleStage(facts, billing), lastLoginAt: facts.lastLoginDate, lastActiveAt: facts.lastActiveAt, lastActiveSource: facts.lastActiveSource, latestLoginSource: latestSource, country: latestCountry, successfulLogins: facts.sessions.length, pluginActiveDays: facts.activityAvailable ? facts.pluginActiveDays : null, activeDaysInRange: facts.activityAvailable ? facts.distinctDays.size : null, pluginActivityAvailable: facts.activityAvailable, creditedJobs: facts.committed.length, creditedJobsInRange: facts.currentCommitted.length, completedJobs: facts.committed.length, jobsInRange: facts.currentCommitted.length, topTool: facts.topTool, toolKeys: [...new Set(facts.committed.map((row) => normalizeToolCode(row.toolCode, row.featureCode).key))], walletStatus: billing ? "initialized" : "missing", availableCredits: billing ? asNumber(billing.availableCredits) : null, heldCredits: billing ? asNumber(billing.heldCredits) : null, subscriptionStatus: billing?.subscriptionStatus || null, subscriptionPlan: billing?.subscriptionPlanCode || null, newsletter: newsletterProfile ? { id: newsletterProfile.id, status: newsletterProfile.status, tags: newsletterProfile.tags || [] } : null };
+    return { id: facts.userId, name: user.name || null, email: user.email || null, picture: user.picture || null, joinedAt: user.createdAt || null, segments: facts.segments, lifecycleStage: resolveLifecycleStage(facts, billing), lastLoginAt: facts.lastLoginDate, lastActiveAt: facts.lastActiveAt, lastActiveSource: facts.lastActiveSource, latestLoginSource: latestSource, country: latestCountry, successfulLogins: facts.sessions.length, pluginActiveDays: facts.activityAvailable ? facts.pluginActiveDays : null, activeDaysInRange: facts.activityAvailable ? facts.distinctDays.size : null, pluginActivityAvailable: facts.activityAvailable, creditedJobs: facts.committed.length, creditedJobsInRange: facts.currentCommitted.length, observedJobs: facts.observedJobs, observedJobsInRange: facts.observedJobsInRange, completedJobs: Math.max(facts.committed.length, facts.observedJobs), completedJobsSource: jobsSource(facts.committed.length, facts.observedJobs), jobsInRange: Math.max(facts.currentCommitted.length, facts.observedJobsInRange), topTool: facts.topTool, toolKeys: [...new Set([...facts.committed.map((row) => normalizeToolCode(row.toolCode, row.featureCode).key), ...(facts.topTool ? [facts.topTool.key] : [])])], walletStatus: billing ? "initialized" : "missing", availableCredits: billing ? asNumber(billing.availableCredits) : null, heldCredits: billing ? asNumber(billing.heldCredits) : null, subscriptionStatus: billing?.subscriptionStatus || facts.subscription?.status || null, subscriptionPlan: billing?.subscriptionPlanCode || facts.subscription?.planCode || null, subscriptionSource: billing?.subscriptionStatus ? "wallet" : facts.subscription ? "subscription_record" : null, subscriptionEndsAt: facts.subscription?.currentPeriodEnd || null, newsletter: newsletterProfile ? { id: newsletterProfile.id, status: newsletterProfile.status, tags: newsletterProfile.tags || [] } : null };
   });
   const unique = (values) => [...new Set(values.filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
   const facets = {
@@ -906,7 +1417,7 @@ export async function productUsers(query = {}, newsletterByEmail = new Map()) {
   }
   const { page, pageSize } = pageOptions(query); const total = rows.length; const offset = (page - 1) * pageSize;
   const segmentCounts = {}; for (const row of rows) for (const item of row.segments) segmentCounts[item] = (segmentCounts[item] || 0) + 1;
-  return { asOf: range.now, coverage: { behavior: "Successful authentication and credited tool activity", newsletter: newsletterByEmail.size ? "connected" : "unavailable" }, summary: { users: total, segmentCounts }, facets, items: rows.slice(offset, offset + pageSize), pagination: { page, pageSize, total, pages: Math.max(1, Math.ceil(total / pageSize)) } };
+  return { asOf: range.now, coverage: { behavior: "Successful authentication, credited tool activity, and tool jobs observed in plugin telemetry", newsletter: newsletterByEmail.size ? "connected" : "unavailable" }, summary: { users: total, segmentCounts }, facets, items: rows.slice(offset, offset + pageSize), pagination: { page, pageSize, total, pages: Math.max(1, Math.ceil(total / pageSize)) } };
 }
 
 export async function productUserDetail(userId) {
@@ -923,7 +1434,7 @@ export async function productUserDetail(userId) {
     (await getBackendFeatureRequestsCollection()).find({ authorId: String(userId), isDeleted: { $ne: true } }, { projection: { title: 1, status: 1, board: 1, votes: 1, commentsCount: 1, createdAt: 1 } }).sort({ createdAt: -1 }).limit(30).toArray(),
   ]);
   const safePurchase = (row) => ({ id: id(row._id), kind: row.kind, productCode: row.productCode, status: row.status, amount: asNumber(row.amountPaise), currency: row.currency || "INR", createdAt: row.createdAt });
-  return { asOf: range.now, user: { id: facts.userId, name: user.name || null, email: user.email || null, picture: user.picture || null, joinedAt: user.createdAt, favorites: user.favorites || [], segments: facts.segments, lifecycleStage: resolveLifecycleStage(facts, billing) }, billing: billing ? { availableCredits: asNumber(billing.availableCredits), heldCredits: asNumber(billing.heldCredits), lifetimeSpentCredits: asNumber(billing.lifetimeSpentCredits), lifetimePurchasedCredits: asNumber(billing.lifetimePurchasedCredits), lifetimeBonusCredits: asNumber(billing.lifetimeBonusCredits), subscriptionStatus: billing.subscriptionStatus, subscriptionPlan: billing.subscriptionPlanCode, pricingTier: billing.pricingTier, pricingCountry: billing.pricingCountry } : null, sessions: facts.sessions.slice(-50).reverse().map((row) => ({ source: row.source || "unknown", country: row.countryCode || null, completedAt: loginAt(row) })), reservations: facts.reservations.slice(-100).reverse().map((row) => ({ id: id(row._id), ...normalizeToolCode(row.toolCode, row.featureCode), rawToolCode: row.toolCode || null, featureCode: row.featureCode || null, status: indexed.compensatedReservations.has(id(row._id)) ? "compensated" : row.status, credits: asNumber(row.creditsReserved), processor: row.processor || null, occurredAt: reservationAt(row), durationMs: row.status === "committed" && row.committedAt && row.createdAt ? asDate(row.committedAt) - asDate(row.createdAt) : null })), ledger: (indexed.ledgers.get(facts.userId) || []).slice().sort((a, b) => asDate(b.createdAt) - asDate(a.createdAt)).slice(0, 100).map((row) => ({ reason: row.reason, deltaCredits: asNumber(row.deltaCredits), tool: normalizeToolCode(row.toolCode, row.featureCode), createdAt: row.createdAt })), purchases: facts.purchases.map(safePurchase), subscriptions: (indexed.subscriptions.get(facts.userId) || []).map((row) => ({ planCode: row.planCode, status: row.status, currentPeriodStart: row.currentPeriodStart, currentPeriodEnd: row.currentPeriodEnd, nextChargeAt: row.nextChargeAt })), refunds: (indexed.refunds.get(facts.userId) || []).map((row) => ({ status: row.status, amountPaise: asNumber(row.amountPaise), reason: row.reason || null, createdAt: row.createdAt })), feedback: [...legacyFeedback.map((row) => ({ source: "legacy", rawScore: row.score ?? null, score: row.score === null || row.score === undefined ? null : Math.round((asNumber(row.score) / 10 * 5) * 10) / 10, scale: 5, sourceScale: 10, type: row.feedbackType || null, tool: row.toolId || null, createdAt: row.createdAt })), ...feedback.map((row) => ({ source: "current", rawScore: row.rating ?? null, score: row.rating ?? null, rating: row.rating ?? null, scale: 5, sourceScale: 5, comment: row.isAnonymous ? null : row.comment || null, path: row.path || null, createdAt: row.createdAt }))].sort((a, b) => asDate(b.createdAt) - asDate(a.createdAt)), featureRequests: requests.map((row) => ({ title: row.title, status: row.status, board: row.board, votes: asNumber(row.votes), comments: asNumber(row.commentsCount), createdAt: row.createdAt })), coverage: { periodDays: detailRange.days, nonCreditToolActivity: !facts.activityAvailable ? "unavailable" : facts.pluginActiveDays > 0 ? "measured" : "no_activity_recorded", pluginActiveDays: facts.activityAvailable ? facts.pluginActiveDays : null, activeDaysInRange: facts.activityAvailable ? facts.distinctDays.size : null, message: !facts.activityAvailable ? "Plugin activity could not be read, so this profile shows logins and credited tool activity only. This is a read failure, not an absence of activity." : facts.pluginActiveDays > 0 ? `Includes successful logins, credited tool activity, and plugin activity for tools that do not consume credits. Covers the last ${detailRange.days} days.` : "Includes successful logins and credited tool activity. No plugin activity has been recorded for this user in the selected period." } };
+  return { asOf: range.now, user: { id: facts.userId, name: user.name || null, email: user.email || null, picture: user.picture || null, joinedAt: user.createdAt, favorites: user.favorites || [], segments: facts.segments, lifecycleStage: resolveLifecycleStage(facts, billing), creditedJobs: facts.committed.length, observedJobs: facts.observedJobs, completedJobs: Math.max(facts.committed.length, facts.observedJobs), completedJobsSource: jobsSource(facts.committed.length, facts.observedJobs), topTool: facts.topTool, subscription: facts.subscription ? { planCode: facts.subscription.planCode || null, status: facts.subscription.status || null, currentPeriodEnd: facts.subscription.currentPeriodEnd || null, walletBacked: Boolean(billing) } : null }, billing: billing ? { availableCredits: asNumber(billing.availableCredits), heldCredits: asNumber(billing.heldCredits), lifetimeSpentCredits: asNumber(billing.lifetimeSpentCredits), lifetimePurchasedCredits: asNumber(billing.lifetimePurchasedCredits), lifetimeBonusCredits: asNumber(billing.lifetimeBonusCredits), subscriptionStatus: billing.subscriptionStatus || facts.subscription?.status || null, subscriptionPlan: billing.subscriptionPlanCode || facts.subscription?.planCode || null, pricingTier: billing.pricingTier, pricingCountry: billing.pricingCountry } : null, sessions: facts.sessions.slice(-50).reverse().map((row) => ({ source: row.source || "unknown", country: row.countryCode || null, completedAt: loginAt(row) })), reservations: facts.reservations.slice(-100).reverse().map((row) => ({ id: id(row._id), ...normalizeToolCode(row.toolCode, row.featureCode), rawToolCode: row.toolCode || null, featureCode: row.featureCode || null, status: indexed.compensatedReservations.has(id(row._id)) ? "compensated" : row.status, credits: asNumber(row.creditsReserved), processor: row.processor || null, occurredAt: reservationAt(row), durationMs: row.status === "committed" && row.committedAt && row.createdAt ? asDate(row.committedAt) - asDate(row.createdAt) : null })), ledger: (indexed.ledgers.get(facts.userId) || []).slice().sort((a, b) => asDate(b.createdAt) - asDate(a.createdAt)).slice(0, 100).map((row) => ({ reason: row.reason, deltaCredits: asNumber(row.deltaCredits), tool: normalizeToolCode(row.toolCode, row.featureCode), createdAt: row.createdAt })), purchases: facts.purchases.map(safePurchase), subscriptions: (indexed.subscriptions.get(facts.userId) || []).map((row) => ({ planCode: row.planCode, status: row.status, currentPeriodStart: row.currentPeriodStart, currentPeriodEnd: row.currentPeriodEnd, nextChargeAt: row.nextChargeAt })), refunds: (indexed.refunds.get(facts.userId) || []).map((row) => ({ status: row.status, amountPaise: asNumber(row.amountPaise), reason: row.reason || null, createdAt: row.createdAt })), feedback: [...legacyFeedback.map((row) => ({ source: "legacy", rawScore: row.score ?? null, score: row.score === null || row.score === undefined ? null : Math.round((asNumber(row.score) / 10 * 5) * 10) / 10, scale: 5, sourceScale: 10, type: row.feedbackType || null, tool: row.toolId || null, createdAt: row.createdAt })), ...feedback.map((row) => ({ source: "current", rawScore: row.rating ?? null, score: row.rating ?? null, rating: row.rating ?? null, scale: 5, sourceScale: 5, comment: row.isAnonymous ? null : row.comment || null, path: row.path || null, createdAt: row.createdAt }))].sort((a, b) => asDate(b.createdAt) - asDate(a.createdAt)), featureRequests: requests.map((row) => ({ title: row.title, status: row.status, board: row.board, votes: asNumber(row.votes), comments: asNumber(row.commentsCount), createdAt: row.createdAt })), coverage: { periodDays: detailRange.days, nonCreditToolActivity: !facts.activityAvailable ? "unavailable" : facts.pluginActiveDays > 0 ? "measured" : "no_activity_recorded", pluginActiveDays: facts.activityAvailable ? facts.pluginActiveDays : null, activeDaysInRange: facts.activityAvailable ? facts.distinctDays.size : null, message: !facts.activityAvailable ? "Plugin activity could not be read, so this profile shows logins and credited tool activity only. This is a read failure, not an absence of activity." : facts.pluginActiveDays > 0 ? `Includes successful logins, credited tool activity, and plugin activity for tools that do not consume credits. Covers the last ${detailRange.days} days.` : "Includes successful logins and credited tool activity. No plugin activity has been recorded for this user in the selected period." } };
 }
 
 function groupToolReservations(rows, compensatedReservations = new Set()) {
@@ -961,11 +1472,12 @@ function serializeTool(group, previous = null) {
 async function toolActivityFromTelemetry(start, end) {
   try {
     const collection = await getEventsCollection();
+    const openIndex = await toolOpensBySessionTool(start, end);
     const rows = await collection
       .aggregate([
         {
           $match: {
-            eventAt: { $gte: start, $lte: end },
+            eventAt: { $gte: start, $lt: end },
             tool: { $nin: [null, "", "unknown"] },
             // Heartbeats and background plumbing carry a tool but represent no
             // user action; including them let idle time outrank real usage in
@@ -974,8 +1486,11 @@ async function toolActivityFromTelemetry(start, end) {
           },
         },
         {
+          // Grouped per session as well as per tool so a completion can be
+          // tested against the open that justifies it. Collapsed back to one
+          // row per tool below.
           $group: {
-            _id: "$tool",
+            _id: { tool: "$tool", session: "$sessionId" },
             events: { $sum: 1 },
             sessions: { $addToSet: "$sessionId" },
             // Email is preferred over userId as the distinct-counting key, and
@@ -999,7 +1514,7 @@ async function toolActivityFromTelemetry(start, end) {
             accountIds: { $addToSet: "$user.userId" },
             opens: { $sum: { $cond: [{ $eq: ["$eventType", "tool_opened"] }, 1, 0] } },
             actionsStarted: { $sum: { $cond: [{ $eq: ["$eventType", "tool_action_started"] }, 1, 0] } },
-            actionsCompleted: { $sum: { $cond: [{ $eq: ["$eventType", "tool_action_completed"] }, 1, 0] } },
+            completionsAt: { $push: { $cond: [{ $eq: ["$eventType", "tool_action_completed"] }, "$eventAt", "$$REMOVE"] } },
             actionsFailed: { $sum: { $cond: [{ $eq: ["$eventType", "tool_action_failed"] }, 1, 0] } },
             errors: { $sum: { $cond: [{ $eq: ["$eventType", "user_facing_error_displayed"] }, 1, 0] } },
             featureUses: { $sum: { $cond: [{ $eq: ["$eventType", "feature_used"] }, 1, 0] } },
@@ -1018,11 +1533,24 @@ async function toolActivityFromTelemetry(start, end) {
       ])
       .toArray();
 
+    // Completions the user did not ask for are removed here, per session, for
+    // the same reason and by the same rule as the per-user job counts: opening
+    // the plugin starts background services that report finished work nobody
+    // requested. Both pages must apply the identical rule or they will disagree
+    // about the same runs.
+    let backgroundCompletions = 0;
+    const flattened = rows.map((row) => {
+      const rawTool = String(row._id?.tool || "").trim().toLowerCase();
+      const initiated = countUserInitiated(row.completionsAt || [], row._id?.session, rawTool, openIndex);
+      backgroundCompletions += initiated.background;
+      return { ...row, _id: row._id?.tool, actionsCompleted: initiated.jobs };
+    });
+
     // Non-tool surfaces are filtered AFTER normalization so aliases collapse
     // first. "dashboard" in particular is the default tool for session,
     // heartbeat and analytics-plumbing events, so it would otherwise dominate
     // both the tools grid and the observed-event total.
-    const measurable = rows.filter((row) => {
+    const measurable = flattened.filter((row) => {
       const normalized = normalizeToolCode(row._id);
       return !NON_TOOL_SURFACES.has(String(row._id || "").trim().toLowerCase()) &&
         !NON_TOOL_SURFACES.has(normalized.key);
@@ -1054,7 +1582,7 @@ async function toolActivityFromTelemetry(start, end) {
       if (latest && (!existing.lastEventAt || latest > asDate(existing.lastEventAt))) existing.lastEventAt = row.lastEventAt;
     }
 
-    return new Map(
+    const byTool = new Map(
       [...merged.values()].map((row) => {
         const normalized = normalizeToolCode(row._id);
         return [
@@ -1070,6 +1598,12 @@ async function toolActivityFromTelemetry(start, end) {
             opens: asNumber(row.opens),
             actionsStarted: asNumber(row.actionsStarted),
             actionsCompleted: asNumber(row.actionsCompleted),
+            // A tool that reports invocations and starts but never a completion
+            // is not idle — it is under-instrumented, and its real job count is
+            // unknowable from telemetry. Naming it beats substituting a number
+            // that means something else.
+            reportsCompletions: asNumber(row.actionsCompleted) > 0
+              || !(asNumber(row.featureUses) || asNumber(row.actionsStarted)),
             actionsFailed: asNumber(row.actionsFailed),
             errors: asNumber(row.errors),
             featureUses: asNumber(row.featureUses),
@@ -1079,11 +1613,12 @@ async function toolActivityFromTelemetry(start, end) {
         ];
       })
     );
+    return { byTool, backgroundCompletions };
   } catch (error) {
     // Telemetry is supplementary to the credit-backed numbers; if it is
     // unreachable the reservation-derived metrics must still render.
     console.error("Tool telemetry aggregation failed:", error?.message || error);
-    return new Map();
+    return { byTool: new Map(), backgroundCompletions: 0 };
   }
 }
 
@@ -1100,7 +1635,7 @@ export async function productTools(days = 30) {
     const newUsers = [...group.users].filter((userId) => inRange(joinedAt.get(userId), range.currentStart, range.now)).length;
     return { ...serialized, newUsers, existingUsers: Math.max(0, serialized.uniqueUsers - newUsers), favorites: favoriteCounts.get(serialized.key) || 0 };
   }).sort((a, b) => b.completedJobs - a.completedJobs);
-  const telemetry = await toolActivityFromTelemetry(range.currentStart, range.now);
+  const { byTool: telemetry, backgroundCompletions } = await toolActivityFromTelemetry(range.currentStart, range.now);
   const existing = new Set(measured.map((row) => row.key));
 
   // Credit-measured tools gain their telemetry counters alongside the
@@ -1109,7 +1644,9 @@ export async function productTools(days = 30) {
   // counts observed activity.
   const measuredWithTelemetry = measured.map((row) => {
     const activity = telemetry.get(row.key);
-    return activity ? { ...row, telemetry: activity, coverage: "measured" } : { ...row, telemetry: null, coverage: "measured" };
+    return activity
+      ? { ...row, telemetry: activity, observedJobs: activity.actionsCompleted, coverage: "measured" }
+      : { ...row, telemetry: null, observedJobs: null, coverage: "measured" };
   });
 
   // Tools with no credit system emit no reservations, so telemetry is their
@@ -1130,6 +1667,7 @@ export async function productTools(days = 30) {
       // a consumer sum two different units into a meaningless total. The
       // observed counts live under `telemetry` instead.
       completedJobs: null,
+      observedJobs: activity.actionsCompleted,
       failedJobs: null,
       creditsConsumed: 0,
       favorites: favoriteCounts.get(activity.key) || 0,
@@ -1161,6 +1699,18 @@ export async function productTools(days = 30) {
       telemetryOnlyTools: telemetryOnly.length,
       unavailableTools: unavailable.length,
       completedJobs: measuredWithTelemetry.reduce((sum, row) => sum + row.completedJobs, 0),
+      // Finished work the plugin observed, across every tool including the ones
+      // with no credit system. Reported beside the credited total rather than
+      // merged into it: on a credit-backed tool the same run appears in both,
+      // so a sum would double it. A large gap between the two is the signal
+      // that reservations are not landing.
+      observedJobs: [...telemetry.values()].reduce((sum, row) => sum + row.actionsCompleted, 0),
+      // Tools whose telemetry can never answer "how many jobs finished".
+      toolsWithoutCompletions: [...telemetry.values()].filter((row) => !row.reportsCompletions).map((row) => row.label),
+      // Finished-work events nobody asked for: background services reporting
+      // themselves at plugin launch. Reported so the size of the filter is
+      // visible rather than silently applied.
+      backgroundCompletions,
       expiredJobs: measuredWithTelemetry.reduce((sum, row) => sum + row.expiredJobs, 0),
       creditsConsumed: measuredWithTelemetry.reduce((sum, row) => sum + row.creditsConsumed, 0),
       observedToolEvents: [...telemetry.values()].reduce((sum, row) => sum + row.events, 0),
@@ -1190,7 +1740,10 @@ export async function productLifecycle(days = 90) {
   for (const { user, facts: item } of facts) {
     const created = asDate(user.createdAt); const monday = new Date(Date.UTC(created.getUTCFullYear(), created.getUTCMonth(), created.getUTCDate() - ((created.getUTCDay() + 6) % 7))); const key = monday.toISOString().slice(0, 10); const row = weeks.get(key) || { week: key, signedUp: 0, loggedIn: 0, activated: 0, returned7d: 0, returned30d: 0, latestSignupAt: created };
     if (created > row.latestSignupAt) row.latestSignupAt = created;
-    row.signedUp += 1; row.loggedIn += Number(item.sessions.length > 0); row.activated += Number(Boolean(item.firstCommitted));
+        // Any tool use, matching the funnel's "Used a tool" stage. Counting only
+    // credited work here made the cohort table's activation rate disagree with
+    // the funnel drawn directly above it.
+    row.signedUp += 1; row.loggedIn += Number(item.sessions.length > 0); row.activated += Number(item.activated);
     // Retention must use the same evidence AND the same rule as the funnel's
     // "returned" stage, which counts distinct calendar days.
     //
@@ -1234,11 +1787,14 @@ export async function productFeedback(days = 90) {
 
 export async function productDataHealth(newsletterConfigured = false) {
   const core = await loadCore(); const latest = (rows, fields) => rows.reduce((result, row) => { for (const field of fields) { const value = asDate(row[field]); if (value && (!result || value > result)) result = value; } return result; }, null);
-  const telemetry = await telemetryHealth(new Date());
+  const [telemetry, identity] = await Promise.all([
+    telemetryHealth(new Date()),
+    identityHealth(new Date(Date.now() - 30 * DAY_MS)),
+  ]);
   telemetry.ageHours = telemetry.latestAt ? Math.round(((Date.now() - telemetry.latestAt) / 36e5) * 10) / 10 : null;
   const completedSessions = core.sessions.filter(successfulSession).length; const incompleteLinkedSessions = core.sessions.filter((row) => row.user && !successfulSession(row)).length; const terminal = core.reservations.filter(terminalReservation); const attributed = terminal.filter((row) => row.toolCode || row.featureCode).length;
   const capturedPurchaseIds = new Set(core.purchases.filter((row) => row.status === "captured").map((row) => id(row._id)));
   const processedRefunds = core.refunds.filter((row) => row.status === "processed");
   const unmatchedProcessedRefunds = processedRefunds.filter((row) => !capturedPurchaseIds.has(id(row.purchase))).length;
-  return { ok: true, asOf: new Date(), components: { backendDatabase: { status: "healthy", users: core.users.length }, newsletter: { status: newsletterConfigured ? "configured" : "unavailable" }, telemetry }, freshness: { users: latest(core.users, ["updatedAt", "createdAt"]), sessions: latest(core.sessions, ["completedAt", "createdAt"]), ledgers: latest(core.ledgers, ["createdAt"]), reservations: latest(core.reservations, ["updatedAt", "createdAt"]), purchases: latest(core.purchases, ["updatedAt", "createdAt"]) }, coverage: { wallets: { users: core.users.length, initialized: core.billings.length, missing: core.users.length - core.billings.length, percent: percent(core.billings.length, core.users.length) }, sessions: { completed: completedSessions, incompleteLinked: incompleteLinkedSessions }, identityJoins: { sessionsWithoutUser: core.sessions.filter((row) => !row.user).length, reservationsWithoutUser: core.reservations.filter((row) => !row.user).length }, toolAttribution: { terminalJobs: terminal.length, attributed, unattributed: terminal.length - attributed, percent: percent(attributed, terminal.length) }, revenue: { capturedPurchases: capturedPurchaseIds.size, processedRefunds: processedRefunds.length, unmatchedProcessedRefunds, message: unmatchedProcessedRefunds ? `${unmatchedProcessedRefunds} processed refunds do not match a captured purchase record.` : capturedPurchaseIds.size ? "Confirmed captured payments are available." : "No confirmed captured payments are present." } } };
+  return { ok: true, asOf: new Date(), components: { backendDatabase: { status: "healthy", users: core.users.length }, newsletter: { status: newsletterConfigured ? "configured" : "unavailable" }, telemetry, identity }, freshness: { users: latest(core.users, ["updatedAt", "createdAt"]), sessions: latest(core.sessions, ["completedAt", "createdAt"]), ledgers: latest(core.ledgers, ["createdAt"]), reservations: latest(core.reservations, ["updatedAt", "createdAt"]), purchases: latest(core.purchases, ["updatedAt", "createdAt"]) }, coverage: { toolJobs: { backgroundCompletionsExcluded: asNumber(core.pluginToolUseLifetime?.backgroundCompletions), ungatedTools: core.pluginToolUseLifetime?.ungatedTools || [], message: "A completed tool action counts as a job only when the same session shows the user opening that tool first. Opening the plugin starts background services that report finished work nobody asked for, and they are excluded by this rule. Tools listed as ungated never report an open, so the rule cannot be applied to them and all of their completions are counted." }, wallets: { users: core.users.length, initialized: core.billings.length, missing: core.users.length - core.billings.length, percent: percent(core.billings.length, core.users.length) }, sessions: { completed: completedSessions, incompleteLinked: incompleteLinkedSessions }, identityJoins: { sessionsWithoutUser: core.sessions.filter((row) => !row.user).length, reservationsWithoutUser: core.reservations.filter((row) => !row.user).length }, toolAttribution: { terminalJobs: terminal.length, attributed, unattributed: terminal.length - attributed, percent: percent(attributed, terminal.length) }, revenue: { capturedPurchases: capturedPurchaseIds.size, processedRefunds: processedRefunds.length, unmatchedProcessedRefunds, message: unmatchedProcessedRefunds ? `${unmatchedProcessedRefunds} processed refunds do not match a captured purchase record.` : capturedPurchaseIds.size ? "Confirmed captured payments are available." : "No confirmed captured payments are present." } } };
 }
