@@ -134,16 +134,23 @@ function normalizeUser(value, fallbackSeed) {
   // record there.
   const inferredId = safeString(user.userId || user.id || user._id, 180);
   const inferredEmail = safeString(user.email, 200);
-  const isAuthenticated = typeof user.isAuthenticated === "boolean"
-    ? user.isAuthenticated
-    : Boolean(inferredId || inferredEmail);
+  // An identifier the plugin actually sent is evidence, and outranks a flag
+  // that says otherwise. The flag used to decide alone, and it is set from the
+  // plugin's own auth state machine — which lags the token it already holds, so
+  // the opening events of every launch arrived as isAuthenticated:false while
+  // carrying a real account id. Those ids were then blanked on the way in and
+  // the person became a signed-out visitor in their own session.
+  const identified = Boolean(inferredId || inferredEmail);
+  const isAuthenticated = identified || user.isAuthenticated === true;
   const creditValue = Number(
     user.creditsRemaining ?? user.billing?.wallet?.availableCredits
   );
   return {
     isAuthenticated,
-    userId: isAuthenticated ? inferredId : null,
-    anonymousId: isAuthenticated
+    // Never discarded once sent. Blanking them on the strength of the flag threw
+    // away the only join the dashboard has.
+    userId: inferredId,
+    anonymousId: identified
       ? null
       : safeString(user.anonymousId || user.anonId, 180) || anonymousId(fallbackSeed),
     // Kept for signed-out visitors too. Figma exposes their display name to
@@ -151,7 +158,7 @@ function normalizeUser(value, fallbackSeed) {
     // discarding it here left a visitor recognisable in Figma but anonymous in
     // the dashboard — which is the gap that made them unreachable.
     name: safeString(user.name, 160),
-    email: isAuthenticated ? inferredEmail : null,
+    email: inferredEmail,
     identitySource: safeString(user.identitySource, 80) || (isAuthenticated ? "authenticated" : "anonymous"),
     creditsRemaining: Number.isFinite(creditValue) ? Math.max(0, creditValue) : null,
   };
