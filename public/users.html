@@ -18,7 +18,7 @@
         </div>
         <button id="refreshAll" class="button primary">Refresh</button>
       </header>
-      <div class="status-bar"><span id="coverageStatus" class="status-chip neutral">Successful logins + credited activity</span><span id="lastUpdated">Loading</span></div>
+      <div class="status-bar"><span id="coverageStatus" class="status-chip neutral">Logins, credited jobs and plugin activity</span><span id="lastUpdated">Loading</span></div>
       <div id="globalNotice" class="notice error" hidden></div>
       <div id="userMetrics" class="metric-grid compact"></div>
       <section>
@@ -27,7 +27,7 @@
           <label>Segment<select id="segment"><option value="all">All users</option><option value="new">New</option><option value="not_activated">Not activated</option><option value="activated">Activated</option><option value="engaged">Engaged</option><option value="returning">Returning</option><option value="low_credit">Low credit</option><option value="at_risk">At risk</option><option value="dormant">Dormant</option><option value="payment_attention">Payment attention</option></select></label>
           <label>Country<select id="country"><option value="all">All countries</option></select></label>
           <label>Login source<select id="source"><option value="all">All sources</option></select></label>
-          <label>Credited tool<select id="tool"><option value="all">All tools</option></select></label>
+          <label>Tool used<select id="tool"><option value="all">All tools</option></select></label>
           <label>Wallet<select id="wallet"><option value="all">All wallets</option><option value="initialized">Initialized</option><option value="missing">Missing</option></select></label>
           <label>Subscription<select id="subscription"><option value="all">All subscriptions</option></select></label>
           <label>Newsletter<select id="newsletter"><option value="all">All statuses</option></select></label>
@@ -35,7 +35,7 @@
           <label>Rows<select id="pageSize"><option>25</option><option>50</option><option>100</option></select></label>
         </div>
         <article class="surface table-surface">
-          <div class="table-scroll"><table><thead><tr><th>User</th><th>Stage</th><th>Last active</th><th>Credited jobs</th><th>Latest tool</th><th>Credits</th><th>Newsletter</th></tr></thead><tbody id="usersBody"></tbody></table></div>
+          <div class="table-scroll"><table><thead><tr><th>User</th><th>Stage</th><th>Last active</th><th>Tool jobs</th><th>Latest tool</th><th>Credits</th><th>Newsletter</th></tr></thead><tbody id="usersBody"></tbody></table></div>
           <div id="pager" class="pager"></div>
         </article>
       </section>
