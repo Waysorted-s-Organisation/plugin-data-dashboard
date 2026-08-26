@@ -60,7 +60,11 @@ var FIELD_BY_COLUMN = {
 var DROPDOWN_FALLBACKS = {
   6: ['Unknown', 'Other'],
   7: ['Unknown'],
-  9: ['Free']
+  // No fallback on Plan. Every other column can afford a catch-all, but writing
+  // "Free" against someone who is paying — because their tier's name is spelled
+  // differently here than in the billing records — is a lie that reads as a
+  // fact. Blank, and reported, is the only honest answer.
+  9: []
 };
 
 /**

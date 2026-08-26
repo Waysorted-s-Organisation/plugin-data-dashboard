@@ -22,7 +22,6 @@ import { productUsers } from "./product-intelligence.js";
  * than two that can drift.
  */
 export const SHEET_ACTIVE_STATUSES = ["New", "Active", "Dormant", "Churned"];
-export const SHEET_PLANS = ["Free", "Trial", "Premium"];
 
 /**
  * Where the person is right now, in the sheet's four words.
@@ -44,16 +43,34 @@ export function activeStatus(row) {
 }
 
 /**
- * Free, Trial or Premium.
+ * The plan the person is on, by its real name.
  *
- * Reads the lifecycle stage rather than the wallet alone, so a subscription
- * granted straight from the backend — which writes no wallet — still reads as
- * Premium rather than Free.
+ * This used to report a single invented word, "Premium", for anyone who had
+ * paid. The tracker's own list is Discover / Core / Pro / Free / Trial — the
+ * actual tiers — so "Premium" matched nothing and every paying customer would
+ * have been written as whatever the fallback was. A vocabulary invented here
+ * cannot be right by accident.
+ *
+ * The plan code is the name: `pro_monthly` and `pro_annual` are both Pro, which
+ * is the tier, not the billing period. Whatever comes out is matched
+ * case-insensitively against the sheet's own list by the writer, so a tier
+ * renamed there needs no change here — and one that matches nothing is
+ * reported rather than quietly relabelled.
  */
 export function plan(row) {
   const status = String(row.subscriptionStatus || "").toLowerCase();
   if (status === "trialing") return "Trial";
-  if (row.lifecycleStage === "customer") return "Premium";
+  const code = String(row.subscriptionPlan || "").trim();
+  if (code) {
+    const tier = code
+      .replace(/[_-](month|monthly|year|yearly|annual|annually|quarterly|weekly)$/i, "")
+      .replaceAll(/[_-]+/g, " ")
+      .trim();
+    if (tier) return tier.replace(/\b\w/g, (letter) => letter.toUpperCase());
+  }
+  // Paid, but the plan name is not recorded anywhere. Saying "Free" would be
+  // wrong and saying a tier would be a guess, so the cell is left for a person.
+  if (row.lifecycleStage === "customer") return "";
   return "Free";
 }
 
