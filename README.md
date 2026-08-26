@@ -133,7 +133,7 @@ node scripts/export-users-sheet.js            # CSV on stdout, ready to paste
 node scripts/export-users-sheet.js --json     # full payload, with the evidence behind each status
 ```
 
-The `Liked Feature` dropdown ships with five options. The dashboard can also report **Icon Library** and **HTML to Design**; add them to the dropdown or those cells will flag as invalid.
+A dropdown set to reject invalid input makes `setValue` **throw**, so before this was handled a single unrecognised tool name aborted the whole sync partway through a row. The script now reads each dropdown's own list, writes only values it accepts, falls back to `Unknown` where the list offers it, and reports whatever it had to drop so the list can be extended. Names it may report: **Icon Library** and **HTML to Design**.
 
 ## Verification
 
