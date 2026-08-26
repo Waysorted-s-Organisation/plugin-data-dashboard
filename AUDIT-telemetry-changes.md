@@ -164,13 +164,14 @@ Each page had grown its own definition of the same words. Fixed, and pinned by `
 
 ## Still open — not touched by this change
 
-Ranked. The first two predate these commits and are unchanged since the last audit.
+Ranked. Items 2 and 3 predate these commits and are unchanged since the last audit.
 
-1. **`readAuthGate` fails open when unconfigured.** `src/server.js:171` returns `next()` when `DASHBOARD_BASIC_AUTH_USER`/`PASS` are empty, and `.env.example` ships both empty, so a deployment that follows the README's copy-the-example setup serves the entire customer database and the privileged newsletter proxy to anonymous callers.
+1. ~~**`readAuthGate` fails open when unconfigured.**~~ **Fixed.** The gate now answers `503 Dashboard authentication is not configured` when either credential is missing, instead of calling `next()`. `npm run dev` sets `ALLOW_UNAUTHENTICATED=true` so local work is unaffected, and that variable is deliberately absent from `.env.example` so copying the example onto a server cannot carry the escape hatch with it. The empty-credential branch now has tests; it previously had none, which is why the suite was green on a wide-open dashboard.
 
-   **Production is not in that state.** Verified against the live deployment after this merge: `GET /api/operations/summary` answers `401` with `WWW-Authenticate: Basic realm="Waysorted Operations"`, which is reachable only on the branch where both credentials are configured. An earlier draft of this document said the live dashboard was exposed; that was wrong.
+   Nothing changed for a configured deployment: the same 401 with the same `WWW-Authenticate` realm, the same 403, the same 200. The realm string is deliberately untouched — browsers cache Basic credentials per realm, so renaming it would sign every operator out. Credentials are now compared in constant time.
 
-   What remains is that the failure is silent. Clearing either variable — a mistyped rename, a lost environment, a fresh preview project — reopens everything with no error, no log line and no startup check. Fail closed instead: refuse to serve with a `503` unless an explicit `ALLOW_UNAUTHENTICATED=true` opt-in is set, put an obviously-invalid placeholder in `.env.example`, and add a test that clears both variables and asserts the operations APIs are not served.
+   The plugin was never behind this gate and still is not: the analytics session exchange, the ingest endpoint and the public `/health` check are all registered ahead of it, and a test asserts telemetry still ingests while the dashboard is refusing to serve.
+
 2. **One failed Mongo connect bricks the process.** `src/db.js:61` and `:88` assign `cachedClient` *before* awaiting `connect()`; a rejected connect leaves a poisoned client that every later call reuses. The new `onDbClose` hook did not address this.
 3. **Unbounded reads.** `loadCoreUncached` pulls nine collections in full on every cache miss, and `productTools` independently re-reads all of `usagereservations`. The 30 s `coreCache` is per-process, so each serverless container pays it separately. This fails suddenly rather than gradually.
 4. **Dead branch.** `$ifNull: ["$deviceId", "$user.anonymousId"]` in both aggregations never reaches the second operand — the ingest always writes a `deviceId`. Harmless, but it reads as a fallback that does not exist.
