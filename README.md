@@ -102,6 +102,39 @@ Plugin telemetry is stitched to accounts by session id: every event in a session
 
 If job counts still look wrong against production, `node scripts/diagnose-user-coverage.js` reports the reservation status distribution, reservations with a broken or missing user link, the credit-ledger reasons actually present, and any telemetry identity that does not join to a `users` document.
 
+## Conversion tracker sync
+
+The "Waysorted — User Conversion Tracker" spreadsheet is co-owned. The dashboard knows when someone signed up, what they last used, whether they are still active and what they pay. A person knows where they came from and what was said to them. The sync writes the first set and never touches the second.
+
+```text
+GET /api/exports/users-sheet?days=30
+```
+
+Returns the machine-owned columns of the **Users** tab, keyed on email. `humanOwnedColumns` names what the writer must leave alone — currently column E, *Source*. That is the acquisition channel; the dashboard knows the *authentication* source, which is a different fact that happens to sound alike, so the payload does not even carry a field for it.
+
+Never written: the **Activity Log** tab (outreach notes are written by people) and the **Dashboard** tab (formulas, which recalculate themselves once Users is populated).
+
+### Daily sync
+
+`integrations/waysorted-sheet-sync.gs` runs inside the spreadsheet's own Apps Script project. Apps Script rather than a service account on purpose: it already runs as the sheet's owner, so there is no Google Cloud project to create, no key file to download, and no long-lived credential in this repository or in a deployment environment. The only secret is the dashboard's own Basic Auth password, held in the script's properties.
+
+1. Extensions → Apps Script, paste the file, save.
+2. Project Settings → Script Properties, add `DASHBOARD_URL`, `DASHBOARD_USER`, `DASHBOARD_PASS`.
+3. Run `removePlaceholderRows` once to clear the shipped Alice/Bob rows.
+4. Run `syncUsersSheet` once to backfill.
+5. Run `installDailyTrigger` once for the 06:00 daily run.
+
+Rows are matched on email: an existing row is updated in place so anything typed beside it survives, a new account is appended, and an account that stops appearing is left alone rather than deleted — a row vanishing is more likely a filter or an outage than a person who ceased to exist.
+
+### One-off export
+
+```bash
+node scripts/export-users-sheet.js            # CSV on stdout, ready to paste
+node scripts/export-users-sheet.js --json     # full payload, with the evidence behind each status
+```
+
+The `Liked Feature` dropdown ships with five options. The dashboard can also report **Icon Library** and **HTML to Design**; add them to the dropdown or those cells will flag as invalid.
+
 ## Verification
 
 ```bash
