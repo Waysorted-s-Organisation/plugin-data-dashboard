@@ -47,14 +47,49 @@ var FIELD_BY_COLUMN = {
   9: 'plan'
 };
 
+/**
+ * Reads a required script property, and on failure says what it DID find.
+ *
+ * "Not set" is true but useless: the property is almost always there under a
+ * name that is off by a character — a missing letter, a trailing dot, a space
+ * pasted along with the text — or it was typed and never saved. Listing the
+ * names actually stored turns a guessing game into a one-look fix.
+ */
 function requiredProperty(name) {
   var value = PROPS.getProperty(name);
-  if (!value) {
-    throw new Error(
-      'Script property "' + name + '" is not set. Open Project Settings → Script Properties and add it.'
-    );
+  if (value && value.trim()) return value.trim();
+
+  var found = PROPS.getKeys();
+  var detail = found.length
+    ? 'Properties currently saved: ' + found.map(function (key) { return '"' + key + '"'; }).join(', ') + '.'
+    : 'No script properties are saved at all — check you pressed "Save script properties".';
+  var nearMiss = found.filter(function (key) {
+    return key !== name && key.replace(/[^A-Za-z]/g, '').toUpperCase().indexOf(name.replace(/_/g, '')) >= 0;
+  });
+  if (nearMiss.length) {
+    detail += ' "' + nearMiss[0] + '" looks like a misspelling of "' + name + '" — rename it exactly, with no trailing dot or spaces.';
+  } else if (value !== null) {
+    detail += ' "' + name + '" exists but its value is empty.';
   }
-  return value;
+  throw new Error('Script property "' + name + '" is not set. ' + detail);
+}
+
+/**
+ * Prints the property names and whether each has a value, without printing the
+ * values themselves — one of them is a password.
+ */
+function showScriptProperties() {
+  var keys = PROPS.getKeys();
+  if (!keys.length) {
+    Logger.log('No script properties are saved. Project Settings → Script Properties → Save script properties.');
+    return 'none';
+  }
+  var report = keys.map(function (key) {
+    var value = PROPS.getProperty(key);
+    return '"' + key + '" → ' + (value && value.trim() ? value.trim().length + ' characters' : 'EMPTY');
+  }).join('\n');
+  Logger.log(report);
+  return report;
 }
 
 function fetchExport() {
@@ -184,5 +219,6 @@ function onOpen() {
     .addItem('Sync users now', 'syncUsersSheet')
     .addItem('Remove placeholder rows', 'removePlaceholderRows')
     .addItem('Install daily sync', 'installDailyTrigger')
+    .addItem('Check settings', 'showScriptProperties')
     .addToUi();
 }
