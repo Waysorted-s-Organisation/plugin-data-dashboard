@@ -48,6 +48,22 @@ var FIELD_BY_COLUMN = {
 };
 
 /**
+ * Columns carrying a reject-on-invalid dropdown, and what to fall back to when
+ * the dashboard reports a value the list has never heard of.
+ *
+ * This is the difference between a sync that finishes and one that stops on the
+ * first row. A rejecting dropdown makes setValue THROW, so a single unrecognised
+ * tool name — the dashboard says "Icon Library", a sheet says "Icon Search" —
+ * aborted the entire run with four cells written. Names drift; the sync has to
+ * survive it.
+ */
+var DROPDOWN_FALLBACKS = {
+  6: ['Unknown', 'Other'],
+  7: ['Unknown'],
+  9: ['Free']
+};
+
+/**
  * Reads a required script property, and on failure says what it DID find.
  *
  * "Not set" is true but useless: the property is almost always there under a
@@ -126,6 +142,54 @@ function fetchExport() {
  * every range access, and a per-row lookup over a few hundred users is the
  * difference between two seconds and a timeout.
  */
+/**
+ * The values a column's dropdown will accept, or null if it accepts anything.
+ *
+ * Read from the sheet rather than hard-coded, so the list stays whatever its
+ * owner decided it should be. Checked across the first few data rows because
+ * validation lives on cells, and the first one is not always formatted.
+ */
+function allowedValues(sheet, column) {
+  var lastRow = Math.max(sheet.getLastRow(), HEADER_ROWS + 1);
+  for (var row = HEADER_ROWS + 1; row <= Math.min(lastRow, HEADER_ROWS + 5); row++) {
+    var rule = sheet.getRange(row, column).getDataValidation();
+    if (!rule) continue;
+    if (rule.getCriteriaType() !== SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) continue;
+    var values = rule.getCriteriaValues()[0];
+    if (values && values.length) {
+      return values.map(function (value) { return String(value); });
+    }
+  }
+  return null;
+}
+
+/**
+ * A value the dropdown will accept, or blank.
+ *
+ * Case-insensitive match first, then the column's fallback, then blank. Blank
+ * rather than a guess: writing "Palettable" because the real answer was not in
+ * the list would be inventing an answer, and this lands in a sheet someone acts
+ * on. Whatever gets dropped is reported so the list can be extended.
+ */
+function coerceToAllowed(value, allowed, fallbacks, dropped) {
+  if (allowed === null) return value;
+  var text = String(value === undefined || value === null ? '' : value).trim();
+  if (!text) return '';
+  for (var i = 0; i < allowed.length; i++) {
+    if (allowed[i].toLowerCase() === text.toLowerCase()) return allowed[i];
+  }
+  for (var f = 0; f < (fallbacks || []).length; f++) {
+    for (var j = 0; j < allowed.length; j++) {
+      if (allowed[j].toLowerCase() === fallbacks[f].toLowerCase()) {
+        dropped[text] = (dropped[text] || 0) + 1;
+        return allowed[j];
+      }
+    }
+  }
+  dropped[text] = (dropped[text] || 0) + 1;
+  return '';
+}
+
 function indexExistingRows(sheet) {
   var lastRow = sheet.getLastRow();
   var index = {};
@@ -148,6 +212,12 @@ function syncUsersSheet() {
   var appendAt = Math.max(sheet.getLastRow(), HEADER_ROWS) + 1;
   var updated = 0;
   var added = 0;
+  var dropped = {};
+
+  // Read once for the whole run rather than per cell: every range access is a
+  // round trip, and this turns a few hundred users from a timeout into seconds.
+  var allowed = {};
+  for (var key in DROPDOWN_FALLBACKS) allowed[key] = allowedValues(sheet, Number(key));
 
   for (var r = 0; r < payload.rows.length; r++) {
     var row = payload.rows[r];
@@ -162,19 +232,33 @@ function syncUsersSheet() {
     } else {
       updated += 1;
     }
-    // Written column by column so column E is skipped rather than overwritten
-    // with a blank. setValue is one call each, which is the cost of not
-    // destroying a column somebody filled in by hand.
+
+    var cells = {};
     for (var col in FIELD_BY_COLUMN) {
       var column = Number(col);
       if (column === SOURCE_COLUMN) continue;
       var value = row[FIELD_BY_COLUMN[col]];
-      sheet.getRange(target, column).setValue(value === undefined || value === null ? '' : value);
+      if (value === undefined || value === null) value = '';
+      if (DROPDOWN_FALLBACKS[column]) {
+        value = coerceToAllowed(value, allowed[column], DROPDOWN_FALLBACKS[column], dropped);
+      }
+      cells[column] = value;
     }
+
+    // Two block writes rather than eight single ones, which also steps over
+    // column E without having to blank it.
+    sheet.getRange(target, 1, 1, 4).setValues([[cells[1], cells[2], cells[3], cells[4]]]);
+    sheet.getRange(target, 6, 1, 4).setValues([[cells[6], cells[7], cells[8], cells[9]]]);
   }
 
   var stamp = 'Synced ' + new Date().toISOString() + ' — ' + updated + ' updated, ' + added + ' added, ' +
     payload.coverage.users + ' accounts. ' + payload.coverage.message;
+  var droppedNames = Object.keys(dropped);
+  if (droppedNames.length) {
+    stamp += ' Values the sheet dropdowns do not accept: ' + droppedNames.map(function (name) {
+      return '"' + name + '" (' + dropped[name] + ')';
+    }).join(', ') + '. Add them to the dropdown to keep them.';
+  }
   PROPS.setProperty('LAST_SYNC', stamp);
   Logger.log(stamp);
   return stamp;
