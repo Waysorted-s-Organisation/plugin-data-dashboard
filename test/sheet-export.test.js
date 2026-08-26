@@ -57,7 +57,7 @@ test("the export carries what the dashboard knows and claims nothing else", asyn
   ]);
   await backend.collection("userbillings").insertOne({
     _id: new ObjectId(), user: premium, availableCredits: 50,
-    lifetimePurchasedCredits: 200, subscriptionStatus: "active", updatedAt: now,
+    lifetimePurchasedCredits: 200, subscriptionStatus: "active", subscriptionPlanCode: "pro_monthly", updatedAt: now,
   });
   await backend.collection("subscriptions").insertOne({
     _id: new ObjectId(), user: comped, planCode: "pro_monthly", status: "active",
@@ -100,9 +100,11 @@ test("the export carries what the dashboard knows and claims nothing else", asyn
     assert.ok(!("source" in row), "the payload does not even carry a source field to be written by mistake");
   }
 
-  assert.equal(byEmail["premium@example.com"].plan, "Premium", "a purchase is Premium");
-  assert.equal(byEmail["comped@example.com"].plan, "Premium", "so is a subscription granted from the backend, wallet or no wallet");
-  assert.equal(byEmail["free@example.com"].plan, "Free");
+  // The plan's own name, not an invented word. The tracker lists the real tiers
+  // — Discover, Core, Pro — so anything made up here matches nothing.
+  assert.equal(byEmail["premium@example.com"].plan, "Pro", "the wallet's plan code, tidied");
+  assert.equal(byEmail["comped@example.com"].plan, "Pro", "including a subscription granted from the backend, wallet or no wallet");
+  assert.equal(byEmail["free@example.com"].plan, "Free", "nobody paying is Free");
 
   assert.equal(byEmail["free@example.com"].activeStatus, "New", "signed up inside the window");
   assert.equal(byEmail["lapsed@example.com"].activeStatus, "Churned", "no sign of life for 100 days");
@@ -120,6 +122,35 @@ test("the export carries what the dashboard knows and claims nothing else", asyn
   // Sorted oldest signup first, so a backfill appends in a sensible order.
   const dates = response.body.rows.map((row) => row.signupDate);
   assert.deepEqual(dates, [...dates].sort(), "rows arrive in signup order");
+});
+
+test("a billing period is not a tier, and an unnamed paid plan is left blank", async (t) => {
+  const { backend } = await harness(t);
+  const now = new Date();
+  const annual = new ObjectId();
+  const nameless = new ObjectId();
+  await backend.collection("users").insertMany([
+    { _id: annual, email: "annual@example.com", name: "Annual Ann", createdAt: now },
+    { _id: nameless, email: "nameless@example.com", name: "Nameless Nell", createdAt: now },
+  ]);
+  await backend.collection("subscriptions").insertMany([
+    { _id: new ObjectId(), user: annual, planCode: "core_annual", status: "active", currentPeriodEnd: new Date(now.getTime() + 300 * DAY), createdAt: now, updatedAt: now },
+    // Paid, with no plan code recorded anywhere.
+    { _id: new ObjectId(), user: nameless, status: "active", currentPeriodEnd: new Date(now.getTime() + 30 * DAY), createdAt: now, updatedAt: now },
+  ]);
+
+  const response = await request(app)
+    .get("/api/exports/users-sheet?days=30")
+    .set("Authorization", basicAuth)
+    .expect(200);
+  const byEmail = Object.fromEntries(response.body.rows.map((row) => [row.email, row]));
+
+  assert.equal(byEmail["annual@example.com"].plan, "Core", "annual is when they pay, not what they bought");
+  assert.equal(
+    byEmail["nameless@example.com"].plan,
+    "",
+    "a paying customer whose tier is unrecorded is blank — writing Free would be a lie that reads as a fact"
+  );
 });
 
 test("status is left blank rather than asserting churn from data that was not read", async (t) => {

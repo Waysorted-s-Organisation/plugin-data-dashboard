@@ -133,7 +133,7 @@ node scripts/export-users-sheet.js            # CSV on stdout, ready to paste
 node scripts/export-users-sheet.js --json     # full payload, with the evidence behind each status
 ```
 
-A dropdown set to reject invalid input makes `setValue` **throw**, so before this was handled a single unrecognised tool name aborted the whole sync partway through a row. The script now reads each dropdown's own list, writes only values it accepts, falls back to `Unknown` where the list offers it, and reports whatever it had to drop so the list can be extended. Names it may report: **Icon Library** and **HTML to Design**.
+A dropdown set to reject invalid input makes `setValue` **throw**, so before this was handled a single unrecognised tool name aborted the whole sync partway through a row. The script now reads each dropdown's own list, writes only values it accepts, falls back to `Unknown` where the list offers it, and reports whatever it had to drop so the list can be extended. The `Plan` column carries the tier's real name, taken from the subscription's plan code with the billing period stripped — `pro_monthly` and `pro_annual` are both `Pro`. There is no fallback on that column: writing `Free` against someone who is paying, because their tier is spelled differently in the tracker than in the billing records, is a lie that reads as a fact. It is left blank and reported instead.
 
 ## Verification
 
