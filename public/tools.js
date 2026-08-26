@@ -12,7 +12,10 @@ async function load() {
       + metricCard("Expired jobs", number(data.summary.expiredJobs), "Processing did not finish")
       + metricCard("Activity tracked", number(data.summary.telemetryOnlyTools), "Tools measured from plugin activity")
       + metricCard("Tracking gaps", number(data.summary.unavailableTools), "No credit or plugin activity recorded")
-      + metricCard("Not reporting completions", number(data.summary.toolsWithoutCompletions.length), data.summary.toolsWithoutCompletions.length ? `${data.summary.toolsWithoutCompletions.join(", ")} — these emit activity but never a finished action, so their job count cannot be measured` : "Every active tool reports when a run finishes");
+      + (() => {
+        const silent = data.summary.toolsWithoutCompletions || [];
+        return metricCard("Not reporting completions", number(silent.length), silent.length ? `${silent.join(", ")} — these emit activity but never a finished action, so their job count cannot be measured` : "Every active tool reports when a run finishes");
+      })();
     // Three coverage states, not two. Tools without a credit system report
     // coverage "telemetry" and carry real activity counts; rendering them
     // through the unavailable template hid exactly the data they provide.
@@ -22,7 +25,7 @@ async function load() {
       }
       if (row.coverage === "telemetry") {
         const activity = row.telemetry || {};
-        return `<article class="tool-score-card"><div class="panel-head"><div><p class="overline">Activity tracked</p><h3>${escapeHtml(row.label)}</h3></div><span class="status-chip good">No credits</span></div><div class="tool-stat-row"><span><strong>${number(row.uniqueUsers)}</strong> users</span><span><strong>${number(activity.opens)}</strong> opens</span><span><strong>${number(activity.actionsCompleted)}</strong> completed</span></div><p>${number(activity.actionsFailed)} failed · ${number(activity.errors)} errors shown · ${duration(activity.activeMs)} active</p><p class="coverage-note">${escapeHtml(row.message)}${row.telemetry?.reportsCompletions === false ? " This tool never emits tool_action_completed, so its finished-job count cannot be measured." : ""}</p></article>`;
+        return `<article class="tool-score-card"><div class="panel-head"><div><p class="overline">Activity tracked</p><h3>${escapeHtml(row.label)}</h3></div><span class="status-chip neutral">Activity only</span></div><div class="tool-stat-row"><span><strong>${number(row.uniqueUsers)}</strong> users</span><span><strong>${number(activity.opens)}</strong> opens</span><span><strong>${number(activity.actionsCompleted)}</strong> completed</span></div><p>${number(activity.actionsFailed)} failed · ${number(activity.errors)} errors shown · ${duration(activity.activeMs)} active</p><p class="coverage-note">${escapeHtml(row.message)}${row.telemetry?.reportsCompletions === false ? " This tool never emits tool_action_completed, so its finished-job count cannot be measured." : ""}</p></article>`;
       }
       return `<article class="tool-score-card unavailable"><div class="panel-head"><div><p class="overline">${escapeHtml(row.catalogStatus || "Catalog")}</p><h3>${escapeHtml(row.label)}</h3></div><span class="status-chip warn">Unavailable</span></div><p>${escapeHtml(row.message)}</p><p><strong>${number(row.favorites)}</strong> users saved this tool as a favorite.</p></article>`;
     }).join("");
