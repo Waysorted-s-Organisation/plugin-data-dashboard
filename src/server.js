@@ -22,6 +22,7 @@ import {
   operationsHealth,
   recentUsers,
 } from "./operations.js";
+import { usersSheetExport } from "./sheet-export.js";
 import {
   productCommercial,
   productDataHealth,
@@ -665,6 +666,25 @@ app.get("/api/operations/data-health", async (_req, res) => {
   }
   catch (error) { return operationsFailure(res, error); }
 });
+/**
+ * The Users tab of the conversion tracker, ready to write.
+ *
+ * Behind the same gate as every other operations API, so the sheet's sync
+ * script authenticates the same way a person does. It returns only the columns
+ * the dashboard owns; the acquisition source and the whole Activity Log belong
+ * to whoever is doing the outreach and are named in `humanOwnedColumns` so a
+ * writer cannot quietly claim them.
+ */
+app.get("/api/exports/users-sheet", async (req, res) => {
+  try {
+    res.setHeader("Cache-Control", "no-store");
+    return res.json(await usersSheetExport({ days: req.query.days || 30 }));
+  } catch (error) {
+    console.error("Users sheet export failed:", error?.message || error);
+    return res.status(503).json({ error: "Operations data is unavailable" });
+  }
+});
+
 app.get("/api/operations/health", async (_req, res) => {
   try {
     const newsletter = newsletterConfig();
