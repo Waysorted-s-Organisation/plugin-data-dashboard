@@ -172,10 +172,75 @@ function newsletterConfig() {
   };
 }
 
+/**
+ * Whether an unauthenticated dashboard is a deliberate choice.
+ *
+ * Local development is the only legitimate reason to run without credentials,
+ * and `npm run dev` sets this. It is deliberately NOT in `.env.example`: that
+ * file gets copied onto servers, and an escape hatch that travels with it is
+ * the same hole under a different name.
+ */
+function allowsUnauthenticated() {
+  return String(process.env.ALLOW_UNAUTHENTICATED || "").trim().toLowerCase() === "true";
+}
+
+let warnedAboutMissingCredentials = false;
+
+/**
+ * Constant-time credential comparison.
+ *
+ * timingSafeEqual requires equal lengths and throws otherwise, which would leak
+ * the length it refused to compare, so both sides are hashed to a fixed width
+ * first.
+ */
+function matchesSecret(supplied, expected) {
+  const digest = (value) => crypto.createHash("sha256").update(String(value), "utf8").digest();
+  return crypto.timingSafeEqual(digest(supplied), digest(expected));
+}
+
+/**
+ * The only authentication in front of the operations APIs, the newsletter
+ * proxy and the dashboard UI.
+ *
+ * It used to call next() when either credential was empty, and `.env.example`
+ * ships both empty — so a deployment that followed the README's copy-the-example
+ * setup served the entire customer database, and a proxy holding a privileged
+ * mass-send token, to anyone who knew the URL. Nothing said so: no error, no log
+ * line, no startup check. Production had the credentials set and was never
+ * exposed, but the failure mode is silent, so a rename, a lost environment or a
+ * fresh preview project reopens everything without a signal.
+ *
+ * It now refuses to serve instead. 503 rather than 401 because the problem is
+ * the deployment, not the caller — there are no credentials for them to send.
+ *
+ * The `WWW-Authenticate` realm below must not change: browsers cache Basic
+ * credentials per realm, and renaming it signs every existing operator out.
+ *
+ * Everything the plugin depends on — the analytics session exchange, the ingest
+ * endpoint — and the public `/health` check are all registered ahead of this
+ * middleware, so refusing here cannot interrupt telemetry or health probes.
+ */
 function readAuthGate(req, res, next) {
   const expectedUser = String(process.env.DASHBOARD_BASIC_AUTH_USER || "").trim();
   const expectedPass = String(process.env.DASHBOARD_BASIC_AUTH_PASS || "").trim();
-  if (!expectedUser || !expectedPass) return next();
+  if (!expectedUser || !expectedPass) {
+    if (allowsUnauthenticated()) {
+      if (!warnedAboutMissingCredentials) {
+        warnedAboutMissingCredentials = true;
+        console.warn(
+          "ALLOW_UNAUTHENTICATED=true: serving the dashboard and every operations API without authentication. Never set this outside local development."
+        );
+      }
+      return next();
+    }
+    if (!warnedAboutMissingCredentials) {
+      warnedAboutMissingCredentials = true;
+      console.error(
+        "DASHBOARD_BASIC_AUTH_USER and DASHBOARD_BASIC_AUTH_PASS are not configured. Refusing to serve the dashboard, the operations APIs and the newsletter proxy. Set both, or set ALLOW_UNAUTHENTICATED=true for local development."
+      );
+    }
+    return res.status(503).json({ error: "Dashboard authentication is not configured" });
+  }
   const authorization = String(req.headers.authorization || "");
   if (!authorization.startsWith("Basic ")) {
     res.setHeader("WWW-Authenticate", 'Basic realm="Waysorted Operations"');
@@ -185,7 +250,11 @@ function readAuthGate(req, res, next) {
   const separator = decoded.indexOf(":");
   const user = separator >= 0 ? decoded.slice(0, separator) : "";
   const pass = separator >= 0 ? decoded.slice(separator + 1) : "";
-  if (user !== expectedUser || pass !== expectedPass) {
+  // Both halves are always compared, so the answer does not arrive sooner for a
+  // wrong username than for a wrong password.
+  const userMatches = matchesSecret(user, expectedUser);
+  const passMatches = matchesSecret(pass, expectedPass);
+  if (!userMatches || !passMatches) {
     return res.status(403).json({ error: "Invalid credentials" });
   }
   return next();

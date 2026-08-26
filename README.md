@@ -27,7 +27,7 @@ Open `http://localhost:4080`. The root URL serves the balanced Summary control c
 
 - `BACKEND_MONGODB_URI` — server-only MongoDB URI for Waysorted. Use a read-only database user.
 - `BACKEND_MONGODB_DB=waysorted`
-- `DASHBOARD_BASIC_AUTH_USER`
+- `DASHBOARD_BASIC_AUTH_USER` — without it the dashboard refuses to serve; there is no open mode.
 - `DASHBOARD_BASIC_AUTH_PASS`
 - `NEWSLETTER_API_URL`
 - `NEWSLETTER_MANAGEMENT_TOKEN`
@@ -66,7 +66,11 @@ The Figma plugin exchanges its existing Waysorted bearer credential for a short-
 
 ## Operations APIs
 
-All operations APIs are protected by dashboard Basic Auth and return `Cache-Control: no-store`.
+All operations APIs, the newsletter proxy and the dashboard UI sit behind dashboard Basic Auth and return `Cache-Control: no-store`.
+
+**The gate fails closed.** With `DASHBOARD_BASIC_AUTH_USER` or `DASHBOARD_BASIC_AUTH_PASS` unset, every one of them answers `503 Dashboard authentication is not configured` — it does not serve them openly. `npm run dev` sets `ALLOW_UNAUTHENTICATED=true` so local work is unaffected; that variable is deliberately absent from `.env.example` so copying the example onto a server cannot carry the escape hatch with it.
+
+The plugin is never affected by this gate. `POST /api/plugin-analytics/session`, `POST /api/plugin-analytics/ingest` and the public `GET /health` are all registered ahead of it, so telemetry and health probes keep working whatever the dashboard credentials are doing.
 
 - `GET /api/operations/credits/overview?days=30`
 - `GET /api/operations/credits/users?page=1&pageSize=25`
