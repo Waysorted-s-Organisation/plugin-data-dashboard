@@ -63,13 +63,13 @@ export function normalizeToolCode(code, featureCode = null) {
   // reservations record. Omitting the hyphenated form split one product into
   // two dashboard rows and double counted its users and jobs.
   if (raw === "frame_gallery" || raw === "frame-gallery" || raw === "frames" || raw === "frames-to-pdf") {
-    return { key: "frames-to-pdf", label: "Frames to PDF", feature: featureCode || null };
+    return { key: "frames-to-pdf", label: "Frames to PDF", feature: featureCode || null, known: true };
   }
   if (raw === "unit_converter" || raw === "unit-converter") {
-    return { key: "unit-converter", label: "Unit Converter", feature: featureCode || null };
+    return { key: "unit-converter", label: "Unit Converter", feature: featureCode || null, known: true };
   }
   if (["pdf", "psd", "eps", "ai", "import-tool", "file-importer"].includes(raw)) {
-    return { key: "file-importer", label: "File Importer", feature: raw };
+    return { key: "file-importer", label: "File Importer", feature: raw, known: true };
   }
   const known = {
     palettable: "Palettable",
@@ -78,10 +78,13 @@ export function normalizeToolCode(code, featureCode = null) {
     "comment-summarizer": "Comment Summarizer",
     "comment-summariser": "Comment Summarizer",
   };
-  if (known[raw]) return { key: raw.replace("summariser", "summarizer"), label: known[raw], feature: featureCode || null };
-  if (raw === "unattributed") return { key: raw, label: "Unattributed", feature: null };
+  if (known[raw]) return { key: raw.replace("summariser", "summarizer"), label: known[raw], feature: featureCode || null, known: true };
+  if (raw === "unattributed") return { key: raw, label: "Unattributed", feature: null, known: false };
   const label = raw.replaceAll(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
-  return { key: raw, label, feature: featureCode || null };
+  // `known: false` says the label below was title-cased from an unrecognised
+  // code rather than looked up. A caller deciding whether a string names a
+  // product — a feedback path, say — must be able to tell the difference.
+  return { key: raw, label, feature: featureCode || null, known: false };
 }
 
 export function loginAt(session) {
