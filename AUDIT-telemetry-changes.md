@@ -166,7 +166,11 @@ Each page had grown its own definition of the same words. Fixed, and pinned by `
 
 Ranked. The first two predate these commits and are unchanged since the last audit.
 
-1. **`readAuthGate` still fails open.** `src/server.js:171` returns `next()` when `DASHBOARD_BASIC_AUTH_USER`/`PASS` are empty, and `.env.example` ships both empty. Deployed as documented, the entire customer database and the privileged newsletter proxy answer anonymous requests. `README.md` still asserts the opposite. **Critical, and unrelated to telemetry — fix it independently of everything else here.**
+1. **`readAuthGate` fails open when unconfigured.** `src/server.js:171` returns `next()` when `DASHBOARD_BASIC_AUTH_USER`/`PASS` are empty, and `.env.example` ships both empty, so a deployment that follows the README's copy-the-example setup serves the entire customer database and the privileged newsletter proxy to anonymous callers.
+
+   **Production is not in that state.** Verified against the live deployment after this merge: `GET /api/operations/summary` answers `401` with `WWW-Authenticate: Basic realm="Waysorted Operations"`, which is reachable only on the branch where both credentials are configured. An earlier draft of this document said the live dashboard was exposed; that was wrong.
+
+   What remains is that the failure is silent. Clearing either variable — a mistyped rename, a lost environment, a fresh preview project — reopens everything with no error, no log line and no startup check. Fail closed instead: refuse to serve with a `503` unless an explicit `ALLOW_UNAUTHENTICATED=true` opt-in is set, put an obviously-invalid placeholder in `.env.example`, and add a test that clears both variables and asserts the operations APIs are not served.
 2. **One failed Mongo connect bricks the process.** `src/db.js:61` and `:88` assign `cachedClient` *before* awaiting `connect()`; a rejected connect leaves a poisoned client that every later call reuses. The new `onDbClose` hook did not address this.
 3. **Unbounded reads.** `loadCoreUncached` pulls nine collections in full on every cache miss, and `productTools` independently re-reads all of `usagereservations`. The 30 s `coreCache` is per-process, so each serverless container pays it separately. This fails suddenly rather than gradually.
 4. **Dead branch.** `$ifNull: ["$deviceId", "$user.anonymousId"]` in both aggregations never reaches the second operand — the ingest always writes a `deviceId`. Harmless, but it reads as a fallback that does not exist.
