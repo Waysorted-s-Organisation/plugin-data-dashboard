@@ -38,6 +38,25 @@ const id = (value) => value === null || value === undefined ? null : String(valu
 const lowCreditThreshold = () => Math.max(0, asNumber(process.env.CREDIT_LOW_THRESHOLD, 20));
 
 /**
+ * Hard ceiling on any single telemetry aggregation.
+ *
+ * These run inside a serverless function with a fixed wall clock, and each of
+ * them already has a defined behaviour for "could not read this": activity
+ * reports `available: false` so rows say "Not measured" instead of asserting
+ * zero, identity resolution degrades to fewer links, and the tools grid falls
+ * back to the reservation-derived numbers. All of those are survivable. The
+ * function running out of time is not — the page fails instead.
+ *
+ * So every aggregation is given a budget and allowed to lose. A timeout raises
+ * inside the same try/catch that already handles an unreachable store.
+ */
+function aggregationOptions() {
+  const configured = Number(String(process.env.ANALYTICS_AGGREGATION_TIMEOUT_MS || "").trim());
+  const maxTimeMS = Number.isFinite(configured) && configured > 0 ? configured : 20000;
+  return { maxTimeMS, allowDiskUse: true };
+}
+
+/**
  * Subscription states that mean money has changed hands, or is committed to.
  *
  * `past_due` and `grace` are included deliberately: the person paid before and
@@ -224,7 +243,7 @@ async function identityLinksByAnonymousId() {
             deviceIds: { $addToSet: "$deviceId" },
           },
         },
-      ])
+      ], aggregationOptions())
       .toArray();
 
     for (const row of rows) {
@@ -272,7 +291,7 @@ async function identityLinksByAnonymousId() {
  * Built over ALL time, like the anonymous-id links, so a July window still
  * resolves a March session.
  */
-async function accountsBySessionId() {
+async function accountsBySessionId(start) {
   const links = new Map();
   try {
     const collection = await getEventsCollection();
@@ -280,6 +299,11 @@ async function accountsBySessionId() {
       .aggregate([
         {
           $match: {
+            // Bounded to the same lookback every other read uses. A session
+            // older than that can contribute to nothing, and an unbounded scan
+            // of the whole event collection is the one query here big enough to
+            // threaten the function's wall clock.
+            eventAt: { $gte: start },
             $or: [
               { "user.userId": { $nin: [null, ""] } },
               { "user.email": { $nin: [null, ""] } },
@@ -298,7 +322,7 @@ async function accountsBySessionId() {
             linkedEmails: { $addToSet: "$payload.email" },
           },
         },
-      ])
+      ], aggregationOptions())
       .toArray();
 
     for (const row of rows) {
@@ -389,7 +413,7 @@ async function pluginActivityDaysByIdentity(start, end, identityLinks = new Map(
             latestName: { $last: "$_id.name" },
           },
         },
-      ])
+      ], aggregationOptions())
       .toArray();
 
     for (const row of rows) {
@@ -468,7 +492,7 @@ async function toolOpensBySessionTool(start, end) {
           },
         },
         { $group: { _id: { session: "$sessionId", tool: "$tool" }, firstOpenAt: { $min: "$eventAt" } } },
-      ])
+      ], aggregationOptions())
       .toArray();
     for (const row of rows) {
       const tool = String(row._id?.tool || "").trim().toLowerCase();
@@ -591,7 +615,7 @@ async function pluginToolUseByIdentity(start, end, identityLinks = new Map(), se
           },
         },
         { $sort: { lastEventAt: -1 } },
-      ])
+      ], aggregationOptions())
       .toArray();
 
     for (const row of rows) {
@@ -696,7 +720,7 @@ async function identityHealth(start) {
             accounts: { $size: { $filter: { input: "$accounts", cond: { $ne: ["$$this", null] } } } },
           },
         },
-      ])
+      ], aggregationOptions())
       .toArray();
     if (!row || !row.sessions) return { status: "unavailable", message: "No plugin events in range to assess identity stability." };
     const devicesPerSession = Math.round((row.devices / row.sessions) * 100) / 100;
@@ -726,7 +750,7 @@ async function telemetryHealth(now = new Date()) {
     const [latest, earliest, activeDays] = await Promise.all([
       collection.findOne(match, { sort: { eventAt: -1 }, projection: { eventAt: 1 } }),
       collection.findOne(match, { sort: { eventAt: 1 }, projection: { eventAt: 1 } }),
-      collection.aggregate([{ $match: { ...match, eventAt: { $gte: new Date(now.getTime() - 8 * DAY_MS) } } }, { $group: { _id: { $dateToString: { date: "$eventAt", format: "%Y-%m-%d", timezone: "UTC" } } } }]).toArray(),
+      collection.aggregate([{ $match: { ...match, eventAt: { $gte: new Date(now.getTime() - 8 * DAY_MS) } } }, { $group: { _id: { $dateToString: { date: "$eventAt", format: "%Y-%m-%d", timezone: "UTC" } } } }], aggregationOptions()).toArray(),
     ]);
     const latestAt = asDate(latest?.eventAt); const earliestAt = asDate(earliest?.eventAt);
     // These messages describe FRESHNESS only. Tool and user metrics are now
@@ -842,11 +866,11 @@ async function loadCoreUncached(range = null) {
   // needed on read.
   // Resolved once and shared: every aggregation below must agree about which
   // pseudonymous ids belong to which accounts, or a user's history splits.
+  const lookbackStart = new Date(Date.now() - lookbackDays * DAY_MS);
   const [identityLinks, sessionLinks] = await Promise.all([
     identityLinksByAnonymousId(),
-    accountsBySessionId(),
+    accountsBySessionId(lookbackStart),
   ]);
-  const lookbackStart = new Date(Date.now() - lookbackDays * DAY_MS);
   const [pluginActivity, pluginActivityCurrent, pluginActivityPrevious, pluginToolUseLifetime, pluginToolUseCurrent, pluginToolUsePrevious] = await Promise.all([
     // Wide index: cohort retention measures each user's return relative to
     // their own signup date, so it needs history beyond any single window.
@@ -1530,7 +1554,7 @@ async function toolActivityFromTelemetry(start, end) {
             lastEventAt: { $max: "$eventAt" },
           },
         },
-      ])
+      ], aggregationOptions())
       .toArray();
 
     // Completions the user did not ask for are removed here, per session, for

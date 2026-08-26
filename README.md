@@ -38,6 +38,7 @@ Optional:
 - `ANALYTICS_STORE_PASSIVE_EVENTS` — defaults to `false`. Persists heartbeats and transport-config events, which are otherwise dropped at ingest. Enable only while debugging a plugin build.
 - `REPORTING_TIMEZONE` — timezone for calendar-day bucketing of activity and returns. Defaults to `UTC`. Set to the timezone your users are in (e.g. `Asia/Kolkata`) so a return is counted on the day it felt like to them.
 - `ANALYTICS_ACTIVITY_LOOKBACK_DAYS=400` — how far back plugin activity is aggregated for cohort retention.
+- `ANALYTICS_AGGREGATION_TIMEOUT_MS=20000` — ceiling on any single telemetry aggregation. Each one degrades honestly when it cannot be read (activity reports itself unavailable rather than asserting zero), so losing one is survivable where the function timing out is not.
 - `NEWSLETTER_PROXY_TIMEOUT_MS=15000`
 - Backend collection-name overrides listed in `.env.example`.
 
