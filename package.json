@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test": "node --test test/*.test.js",
-    "test:newsletter": "node --test test/newsletter-*.test.js"
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "test:newsletter": "node --test --test-concurrency=1 test/newsletter-*.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

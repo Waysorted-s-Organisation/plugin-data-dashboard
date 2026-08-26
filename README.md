@@ -85,11 +85,25 @@ All operations APIs are protected by dashboard Basic Auth and return `Cache-Cont
 
 Credit consumption counts committed reservation lifecycles, excludes released and pending holds, and subtracts compensation credits. Tool attribution uses `toolCode`, then `featureCode`, then the explicit `Unattributed` label.
 
+Per-user tool jobs report committed reservations when the person has any, and fall back to completed tool actions observed in plugin telemetry when they do not — a run that never reached a committed reservation, or a signed-out visitor who cannot hold one, would otherwise read as zero next to a tool they demonstrably used. Each row carries `creditedJobs`, `observedJobs` and a `completedJobsSource` of `credited` or `observed`. **The two counts are never summed:** once a tool charges credits a single run emits both a committed reservation and a `tool_action_completed` event, so adding them would report one job as two.
+
+A completed tool action counts as a job only when the same session shows the user opening that tool at or before it. Opening the plugin starts background services that report finished work nobody asked for; without this rule the job column measured how often people opened the plugin. Tools that never report `tool_opened` cannot be judged by the rule, so all of their completions are counted and the tool is listed as ungated on Data Health. The number of excluded completions is reported as `summary.backgroundCompletions` on `GET /api/operations/tools`.
+
+A tool job means a run that **finished**: a committed reservation, or a `tool_action_completed` event. `feature_used` is not counted and never substituted — it marks an invocation, not a completion. Tools that emit activity but never a completion are listed in `GET /api/operations/tools` as `summary.toolsWithoutCompletions` and shown on the Tools page, because their job counts cannot be measured until the plugin reports finished runs.
+
+Commercial standing reads the `subscriptions` collection as well as the wallet, so a subscription granted directly in the backend — which writes no `userbillings` document — still makes the user a customer. Such rows carry `subscriptionSource: "subscription_record"`, and the missing wallet is still reported rather than hidden.
+
+Plugin telemetry is stitched to accounts by session id: every event in a session that carried an account anywhere belongs to that account, including the pre-authentication events at the head of a launch. This is what keeps a hard-login plugin from producing "signed-out visitor" rows. Sessions that never carried an account remain anonymous; sessions carrying two are left unattributed. Because the plugin currently mints a new device id per launch, signed-out visitors cannot be de-duplicated across launches — Data Health reports this under **Plugin identity**, and the fix is to persist the device id in `figma.clientStorage`.
+
+If job counts still look wrong against production, `node scripts/diagnose-user-coverage.js` reports the reservation status distribution, reservations with a broken or missing user link, the credit-ledger reasons actually present, and any telemetry identity that does not join to a `users` document.
+
 ## Verification
 
 ```bash
 npm test
 ```
+
+Test files run one at a time (`--test-concurrency=1`). Every file drives the same module-level Express app and sets `process.env.MONGODB_URI` / `BACKEND_MONGODB_URI` to its own in-memory database, so running them in parallel lets one file point another's requests at the wrong database mid-assertion.
 
 The isolated test suite covers authentication, wallet joins, lifecycle rules, revenue/refunds, tool-state classification, feedback normalization, pagination, low-credit boundaries, Newsletter joins, telemetry token validation and deduplication, sanitized health responses, and removal of retired pages/APIs.
 
