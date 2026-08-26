@@ -108,7 +108,7 @@ If job counts still look wrong against production, `node scripts/diagnose-user-c
 npm test
 ```
 
-Test files run one at a time (`--test-concurrency=1`). Every file drives the same module-level Express app and sets `process.env.MONGODB_URI` / `BACKEND_MONGODB_URI` to its own in-memory database, so running them in parallel lets one file point another's requests at the wrong database mid-assertion.
+Test files run one at a time (`--test-concurrency=1`) with the core cache disabled (`DASHBOARD_CORE_CACHE_MS=0`). Every file drives the same module-level Express app and sets `process.env.MONGODB_URI` / `BACKEND_MONGODB_URI` to its own in-memory database, so running them in parallel lets one file point another's requests at the wrong database mid-assertion. The cache is keyed on those URIs, and `MongoMemoryServer` reuses ports, so a 30-second-old entry from a finished test can answer a later one that happens to draw the same port — disabling it makes every assertion read live data.
 
 The isolated test suite covers authentication, wallet joins, lifecycle rules, revenue/refunds, tool-state classification, feedback normalization, pagination, low-credit boundaries, Newsletter joins, telemetry token validation and deduplication, sanitized health responses, and removal of retired pages/APIs.
 

@@ -6,6 +6,7 @@ import {
   getBackendUserBillingCollection,
   getBackendUsersCollection,
 } from "./db.js";
+import { normalizeToolCode } from "./product-metrics.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -44,8 +45,21 @@ function pageOptions(query = {}) {
   return { page, pageSize };
 }
 
+/**
+ * The tool a ledger row belongs to, named the way every other page names it.
+ *
+ * This used to return the raw string off the document. Nothing collapsed the
+ * aliases the rest of the dashboard already knows about — `frame_gallery`,
+ * `frame-gallery` and `frames` are one product — so the credits page split one
+ * tool into three rows, divided its uses and credits between them, and labelled
+ * them differently from the tools page. Two pages, same reservations, different
+ * answers.
+ */
 function normalizedTool(row) {
-  return String(row?.toolCode || row?.featureCode || "Unattributed").trim() || "Unattributed";
+  const raw = row?.toolCode || row?.featureCode || null;
+  if (!raw) return { key: "unattributed", label: "Unattributed" };
+  const normalized = normalizeToolCode(raw);
+  return { key: normalized.key, label: normalized.label };
 }
 
 function serializeLedger(row) {
@@ -56,7 +70,8 @@ function serializeLedger(row) {
     balanceAfter: row.balanceAfter === null || row.balanceAfter === undefined
       ? null
       : number(row.balanceAfter),
-    tool: normalizedTool(row),
+    // The label, not the object: this row is rendered directly.
+    tool: normalizedTool(row).label,
     reservationId: id(row.reservation),
     createdAt: row.createdAt || null,
   };
@@ -117,7 +132,7 @@ async function loadConsumption({ days = "all", userIds = null } = {}) {
       return {
         userId: id(commit.user),
         reservationId: id(commit.reservation),
-        tool: normalizedTool(commit.toolCode || commit.featureCode ? commit : state.source),
+        ...normalizedTool(commit.toolCode || commit.featureCode ? commit : state.source),
         credits,
         // Fully refunded: the user was charged and then made whole, so this is
         // not consumption. The users page already excludes these; counting them
@@ -132,33 +147,50 @@ function aggregateConsumption(rows) {
   const tools = new Map();
   const users = new Map();
   for (const row of rows) {
-    const tool = tools.get(row.tool) || {
-      tool: row.tool,
+    const tool = tools.get(row.key) || {
+      tool: row.key,
+      toolLabel: row.label,
       completedUses: 0,
+      compensatedUses: 0,
       creditsSpent: 0,
       users: new Set(),
     };
-    tool.completedUses += 1;
+    // A fully compensated reservation is a charge that was reversed, not a use.
+    // The page summary already excluded these while the per-tool rows did not,
+    // so the bars added up to more than the total printed above them.
+    if (row.compensated) tool.compensatedUses += 1;
+    else tool.completedUses += 1;
     tool.creditsSpent += row.credits;
     if (row.userId) tool.users.add(row.userId);
-    tools.set(row.tool, tool);
+    tools.set(row.key, tool);
 
     if (!row.userId) continue;
     const user = users.get(row.userId) || {
       creditsSpent: 0,
       completedUses: 0,
+      compensatedUses: 0,
       latestCreditAt: null,
       tools: new Map(),
     };
     user.creditsSpent += row.credits;
-    user.completedUses += 1;
+    if (row.compensated) user.compensatedUses += 1;
+    else user.completedUses += 1;
     if (!user.latestCreditAt || date(row.createdAt) > date(user.latestCreditAt)) {
       user.latestCreditAt = row.createdAt;
     }
-    const userTool = user.tools.get(row.tool) || { tool: row.tool, creditsSpent: 0, completedUses: 0 };
+    const userTool = user.tools.get(row.key)
+      || { tool: row.key, toolLabel: row.label, creditsSpent: 0, completedUses: 0, compensatedUses: 0, latestCreditAt: null };
+    // Per tool, not just per user. The caller below sorts these by recency and
+    // had nothing to sort on — the field only existed on the user — so every
+    // comparison was NaN and the order was whichever tool happened to be seen
+    // first.
+    if (!userTool.latestCreditAt || date(row.createdAt) > date(userTool.latestCreditAt)) {
+      userTool.latestCreditAt = row.createdAt;
+    }
     userTool.creditsSpent += row.credits;
-    userTool.completedUses += 1;
-    user.tools.set(row.tool, userTool);
+    if (row.compensated) userTool.compensatedUses += 1;
+    else userTool.completedUses += 1;
+    user.tools.set(row.key, userTool);
     users.set(row.userId, user);
   }
 
@@ -166,7 +198,9 @@ function aggregateConsumption(rows) {
     tools: Array.from(tools.values())
       .map((row) => ({
         tool: row.tool,
+        toolLabel: row.toolLabel,
         completedUses: row.completedUses,
+        compensatedUses: row.compensatedUses,
         creditsSpent: row.creditsSpent,
         userCount: row.users.size,
       }))
@@ -266,8 +300,8 @@ export async function creditOverview(days = 30) {
     },
     tools: consumption.tools,
     dataQuality: {
-      toolAttributedUses: consumptionRows.filter((row) => row.tool !== "Unattributed").length,
-      unattributedUses: consumptionRows.filter((row) => row.tool === "Unattributed").length,
+      toolAttributedUses: consumptionRows.filter((row) => row.key !== "unattributed").length,
+      unattributedUses: consumptionRows.filter((row) => row.key === "unattributed").length,
     },
   };
 }
@@ -400,7 +434,8 @@ export async function recentUsers(query = {}) {
       name: user.name || null,
       email: user.email || null,
       picture: user.picture || null,
-      latestCreditTool: latestRow?.tool || topTools[0]?.tool || null,
+      latestCreditTool: latestRow?.label || topTools[0]?.toolLabel || null,
+      latestCreditToolKey: latestRow?.key || topTools[0]?.tool || null,
       latestCreditAt: latestRow?.createdAt || usage?.latestCreditAt || null,
     };
   });
