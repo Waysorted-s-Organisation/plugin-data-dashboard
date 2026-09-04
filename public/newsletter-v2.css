@@ -16,3 +16,4 @@
 tbody tr[data-user-id]{cursor:pointer}tbody tr[data-user-id]:hover{background:#f8f8fa}
 @media(max-width:1100px){.tool-score-grid{grid-template-columns:repeat(2,1fr)}.coverage-grid,.health-card-grid{grid-template-columns:1fr}}
 @media(max-width:650px){.tool-score-grid{grid-template-columns:1fr}.detail-grid{grid-template-columns:1fr}.funnel-stage{min-width:0}.tool-stat-row{grid-template-columns:1fr}.sidebar nav a{padding-block:8px}}
+.attribution-layout{align-items:start}.attribution-preview{display:grid;gap:7px;padding:13px;border:1px solid var(--border);border-radius:12px;background:var(--surface-2);color:var(--muted);font-size:12px}.attribution-preview code{display:block;overflow-wrap:anywhere;color:var(--text);font-family:"SFMono-Regular",Consolas,monospace;font-size:12px}.attribution-layout .explanation-list{margin-top:14px}.copy-campaign{white-space:nowrap}

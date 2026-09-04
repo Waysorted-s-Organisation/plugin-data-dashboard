@@ -7,6 +7,7 @@ Owner-only product-intelligence console built around the questions a product own
 - **Tools** — completion, release, expiry, repeat use and measurement coverage.
 - **User Journey** — signup-to-login-to-credited-activation funnel and mature cohort returns.
 - **Credits & Billing** — wallets, ledger-backed consumption, purchases, subscriptions and refunds.
+- **Attribution** — owner-created UTM checkout links stored in the dashboard database.
 - **Newsletter** — N1/N2 automations, audience, templates, campaigns and delivery analytics.
 - **Feedback & Requests** — normalized customer feedback and roadmap demand.
 - **Data Health** — freshness, coverage, telemetry state and API reliability.
@@ -29,6 +30,7 @@ Open `http://localhost:4080`. The root URL serves the balanced Summary control c
 - `BACKEND_MONGODB_DB=waysorted`
 - `DASHBOARD_BASIC_AUTH_USER` — without it the dashboard refuses to serve; there is no open mode.
 - `DASHBOARD_BASIC_AUTH_PASS`
+- `DASHBOARD_ADMIN_EMAILS=anshbhatt140@gmail.com` — additional email usernames using the same password.
 - `NEWSLETTER_API_URL`
 - `NEWSLETTER_MANAGEMENT_TOKEN`
 
@@ -40,6 +42,7 @@ Optional:
 - `ANALYTICS_ACTIVITY_LOOKBACK_DAYS=400` — how far back plugin activity is aggregated for cohort retention.
 - `ANALYTICS_AGGREGATION_TIMEOUT_MS=20000` — ceiling on any single telemetry aggregation. Each one degrades honestly when it cannot be read (activity reports itself unavailable rather than asserting zero), so losing one is survivable where the function timing out is not.
 - `NEWSLETTER_PROXY_TIMEOUT_MS=15000`
+- `WAYSORTED_PUBLIC_URL=https://www.waysorted.com`
 - Backend collection-name overrides listed in `.env.example`.
 
 `BACKEND_MONGODB_URI` never falls back to the analytics URI. Missing configuration returns an explicit `503`; the UI does not substitute zeroes.
@@ -85,6 +88,8 @@ The plugin is never affected by this gate. `POST /api/plugin-analytics/session`,
 - `GET /api/operations/feedback?days=90`
 - `GET /api/operations/data-health`
 - `GET /api/operations/health`
+- `GET /api/operations/attribution/campaigns`
+- `POST /api/operations/attribution/campaigns`
 - `GET /api/newsletter/customers/:subscriberId`
 - `/api/newsletter/*` — allowlisted server-side proxy to Newsletter management APIs.
 

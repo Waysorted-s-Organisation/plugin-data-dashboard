@@ -13,6 +13,10 @@ import {
   getBackendUsersCollection,
   getEventsCollection,
 } from "./db.js";
+import {
+  createAttributionCampaign,
+  listAttributionCampaigns,
+} from "./attribution.js";
 import { enrichCampaignRecipients } from "./newsletter-recipients.js";
 import {
   creditOverview,
@@ -224,6 +228,12 @@ function matchesSecret(supplied, expected) {
 function readAuthGate(req, res, next) {
   const expectedUser = String(process.env.DASHBOARD_BASIC_AUTH_USER || "").trim();
   const expectedPass = String(process.env.DASHBOARD_BASIC_AUTH_PASS || "").trim();
+  const adminEmails = String(
+    process.env.DASHBOARD_ADMIN_EMAILS ?? "anshbhatt140@gmail.com"
+  )
+    .split(",")
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean);
   if (!expectedUser || !expectedPass) {
     if (allowsUnauthenticated()) {
       if (!warnedAboutMissingCredentials) {
@@ -253,7 +263,10 @@ function readAuthGate(req, res, next) {
   const pass = separator >= 0 ? decoded.slice(separator + 1) : "";
   // Both halves are always compared, so the answer does not arrive sooner for a
   // wrong username than for a wrong password.
-  const userMatches = matchesSecret(user, expectedUser);
+  const userMatches = [expectedUser, ...adminEmails].reduce(
+    (matched, candidate) => matchesSecret(user.toLowerCase(), candidate.toLowerCase()) || matched,
+    false
+  );
   const passMatches = matchesSecret(pass, expectedPass);
   if (!userMatches || !passMatches) {
     return res.status(403).json({ error: "Invalid credentials" });
@@ -441,6 +454,10 @@ function newsletterMutationHasTrustedOrigin(req) {
   const protocol = String(req.headers["x-forwarded-proto"] || req.protocol || "https").split(",")[0].trim();
   const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
   return Boolean(host) && origin === `${protocol}://${host}`;
+}
+
+function dashboardMutationHasTrustedOrigin(req) {
+  return newsletterMutationHasTrustedOrigin(req);
 }
 
 async function newsletterProxy(req, res) {
@@ -691,6 +708,38 @@ app.get("/api/operations/health", async (_req, res) => {
     res.setHeader("Cache-Control", "no-store");
     return res.json(await operationsHealth(Boolean(newsletter.apiUrl && newsletter.token)));
   } catch (error) { return operationsFailure(res, error); }
+});
+
+app.get("/api/operations/attribution/campaigns", async (_req, res) => {
+  try {
+    await ensureAnalyticsReady();
+    res.setHeader("Cache-Control", "no-store");
+    return res.json(await listAttributionCampaigns());
+  } catch (error) {
+    return operationsFailure(res, error);
+  }
+});
+
+app.post("/api/operations/attribution/campaigns", async (req, res) => {
+  if (!dashboardMutationHasTrustedOrigin(req)) {
+    return res.status(403).json({ error: "Cross-origin mutation blocked" });
+  }
+  try {
+    await ensureAnalyticsReady();
+    const authorization = String(req.headers.authorization || "");
+    const decoded = authorization.startsWith("Basic ")
+      ? Buffer.from(authorization.slice(6), "base64").toString("utf8")
+      : "";
+    const createdBy = decoded.includes(":") ? decoded.slice(0, decoded.indexOf(":")) : null;
+    const campaign = await createAttributionCampaign(req.body, createdBy);
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(201).json({ campaign });
+  } catch (error) {
+    if (error?.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+    return operationsFailure(res, error);
+  }
 });
 
 app.get("/api/newsletter/customers/:subscriberId", newsletterCustomerProfile);

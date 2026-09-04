@@ -33,6 +33,7 @@ export function mountSidebar(active) {
     ["tools", "/tools.html", "◇", "Tools"],
     ["journey", "/journey.html", "↗", "User Journey"],
     ["credits", "/credits.html", "◉", "Credits & Billing"],
+    ["attribution", "/attribution.html", "⌁", "Attribution"],
     ["newsletter", "/newsletter.html", "✉", "Newsletter"],
     ["feedback", "/feedback.html", "♡", "Feedback & Requests"],
     ["health", "/data-health.html", "●", "Data Health"],
