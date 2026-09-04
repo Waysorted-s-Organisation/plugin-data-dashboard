@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Attribution | Waysorted Operations</title>
+    <link rel="stylesheet" href="/newsletter-v2.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">Skip to content</a>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar"></aside>
+      <main id="workspace" class="workspace">
+        <header class="page-head">
+          <div class="heading-row">
+            <button id="menuToggle" class="icon-button menu-toggle" type="button" aria-label="Open navigation">☰</button>
+            <div><p class="overline">Growth operations</p><h1>Attribution</h1><p>Create trackable Waysorted checkout links for partners and campaigns.</p></div>
+          </div>
+          <button id="refreshCampaigns" class="button secondary" type="button">Refresh</button>
+        </header>
+
+        <div class="status-bar" aria-live="polite"><span class="status-chip good">Owner-only campaign manager</span><span id="lastUpdated">Loading campaigns</span></div>
+        <div id="globalNotice" class="notice error" role="alert" hidden></div>
+
+        <div class="content-grid two attribution-layout">
+          <section class="surface" aria-labelledby="createTitle">
+            <div class="section-title"><div><p class="overline">New link</p><h2 id="createTitle">Create campaign</h2><p>The UTM values will be saved with a customer’s checkout attribution.</p></div></div>
+            <form id="campaignForm" class="form-grid">
+              <label class="span-two">Campaign name<input id="name" name="name" required maxlength="120" value="Madhura" placeholder="Madhura" /></label>
+              <label>UTM source<input id="utmSource" name="utmSource" required maxlength="100" value="madhura" placeholder="madhura" /></label>
+              <label>UTM medium<input id="utmMedium" name="utmMedium" required maxlength="100" value="referral" /></label>
+              <label>UTM campaign<input id="utmCampaign" name="utmCampaign" required maxlength="100" value="checkout" /></label>
+              <label>Destination path<input id="destinationPath" name="destinationPath" required maxlength="300" value="/payment" /></label>
+              <div class="span-two attribution-preview"><span>Link preview</span><code id="linkPreview">Preparing preview…</code></div>
+              <div class="span-two wizard-actions"><span id="formStatus" aria-live="polite"></span><button id="createCampaign" class="button primary" type="submit">Create campaign</button></div>
+            </form>
+          </section>
+
+          <aside class="surface">
+            <p class="overline">How it works</p><h3>Checkout attribution</h3>
+            <div class="explanation-list">
+              <p><strong>1. Share the link</strong><span>Send the generated checkout URL to the partner or campaign owner.</span></p>
+              <p><strong>2. Visitor opens it</strong><span>Waysorted remembers the latest tagged visit for 30 days.</span></p>
+              <p><strong>3. Purchase is recorded</strong><span>The source, medium, and campaign are attached to the purchase record.</span></p>
+            </div>
+          </aside>
+        </div>
+
+        <section aria-labelledby="campaignsTitle">
+          <div class="section-title"><div><p class="overline">Saved links</p><h2 id="campaignsTitle">Campaigns</h2><p>Copy a link whenever you need to share it again.</p></div></div>
+          <article class="surface table-surface"><div class="table-scroll"><table><thead><tr><th>Name</th><th>Source</th><th>Medium</th><th>Campaign</th><th>Created</th><th>Link</th></tr></thead><tbody id="campaignsBody"><tr><td colspan="6"><div class="empty-state">Loading campaigns…</div></td></tr></tbody></table></div></article>
+        </section>
+      </main>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script type="module" src="/attribution.js"></script>
+  </body>
+</html>

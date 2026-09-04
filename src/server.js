@@ -13,6 +13,10 @@ import {
   getBackendUsersCollection,
   getEventsCollection,
 } from "./db.js";
+import {
+  createAttributionCampaign,
+  listAttributionCampaigns,
+} from "./attribution.js";
 import { enrichCampaignRecipients } from "./newsletter-recipients.js";
 import {
   creditOverview,
@@ -130,6 +134,12 @@ function newsletterConfig() {
 function readAuthGate(req, res, next) {
   const expectedUser = String(process.env.DASHBOARD_BASIC_AUTH_USER || "").trim();
   const expectedPass = String(process.env.DASHBOARD_BASIC_AUTH_PASS || "").trim();
+  const adminEmails = String(
+    process.env.DASHBOARD_ADMIN_EMAILS ?? "anshbhatt140@gmail.com"
+  )
+    .split(",")
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean);
   if (!expectedUser || !expectedPass) return next();
   const authorization = String(req.headers.authorization || "");
   if (!authorization.startsWith("Basic ")) {
@@ -140,7 +150,8 @@ function readAuthGate(req, res, next) {
   const separator = decoded.indexOf(":");
   const user = separator >= 0 ? decoded.slice(0, separator) : "";
   const pass = separator >= 0 ? decoded.slice(separator + 1) : "";
-  if (user !== expectedUser || pass !== expectedPass) {
+  const allowedUser = user === expectedUser || adminEmails.includes(user.toLowerCase());
+  if (!allowedUser || pass !== expectedPass) {
     return res.status(403).json({ error: "Invalid credentials" });
   }
   return next();
@@ -298,6 +309,10 @@ function newsletterMutationHasTrustedOrigin(req) {
   const protocol = String(req.headers["x-forwarded-proto"] || req.protocol || "https").split(",")[0].trim();
   const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
   return Boolean(host) && origin === `${protocol}://${host}`;
+}
+
+function dashboardMutationHasTrustedOrigin(req) {
+  return newsletterMutationHasTrustedOrigin(req);
 }
 
 async function newsletterProxy(req, res) {
@@ -529,6 +544,38 @@ app.get("/api/operations/health", async (_req, res) => {
     res.setHeader("Cache-Control", "no-store");
     return res.json(await operationsHealth(Boolean(newsletter.apiUrl && newsletter.token)));
   } catch (error) { return operationsFailure(res, error); }
+});
+
+app.get("/api/operations/attribution/campaigns", async (_req, res) => {
+  try {
+    await ensureAnalyticsReady();
+    res.setHeader("Cache-Control", "no-store");
+    return res.json(await listAttributionCampaigns());
+  } catch (error) {
+    return operationsFailure(res, error);
+  }
+});
+
+app.post("/api/operations/attribution/campaigns", async (req, res) => {
+  if (!dashboardMutationHasTrustedOrigin(req)) {
+    return res.status(403).json({ error: "Cross-origin mutation blocked" });
+  }
+  try {
+    await ensureAnalyticsReady();
+    const authorization = String(req.headers.authorization || "");
+    const decoded = authorization.startsWith("Basic ")
+      ? Buffer.from(authorization.slice(6), "base64").toString("utf8")
+      : "";
+    const createdBy = decoded.includes(":") ? decoded.slice(0, decoded.indexOf(":")) : null;
+    const campaign = await createAttributionCampaign(req.body, createdBy);
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(201).json({ campaign });
+  } catch (error) {
+    if (error?.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+    return operationsFailure(res, error);
+  }
 });
 
 app.get("/api/newsletter/customers/:subscriberId", newsletterCustomerProfile);

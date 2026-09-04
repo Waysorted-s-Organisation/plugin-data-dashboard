@@ -7,6 +7,7 @@ Owner-only product-intelligence console built around the questions a product own
 - **Tools** — completion, release, expiry, repeat use and measurement coverage.
 - **User Journey** — signup-to-login-to-credited-activation funnel and mature cohort returns.
 - **Credits & Billing** — wallets, ledger-backed consumption, purchases, subscriptions and refunds.
+- **Attribution** — owner-created UTM checkout links stored in the dashboard database.
 - **Newsletter** — N1/N2 automations, audience, templates, campaigns and delivery analytics.
 - **Feedback & Requests** — normalized customer feedback and roadmap demand.
 - **Data Health** — freshness, coverage, telemetry state and API reliability.
@@ -29,6 +30,7 @@ Open `http://localhost:4080`. The root URL serves the balanced Summary control c
 - `BACKEND_MONGODB_DB=waysorted`
 - `DASHBOARD_BASIC_AUTH_USER`
 - `DASHBOARD_BASIC_AUTH_PASS`
+- `DASHBOARD_ADMIN_EMAILS=anshbhatt140@gmail.com` — additional email usernames using the same password.
 - `NEWSLETTER_API_URL`
 - `NEWSLETTER_MANAGEMENT_TOKEN`
 
@@ -36,6 +38,7 @@ Optional:
 
 - `CREDIT_LOW_THRESHOLD=20`
 - `NEWSLETTER_PROXY_TIMEOUT_MS=15000`
+- `WAYSORTED_PUBLIC_URL=https://www.waysorted.com`
 - Backend collection-name overrides listed in `.env.example`.
 
 `BACKEND_MONGODB_URI` never falls back to the analytics URI. Missing configuration returns an explicit `503`; the UI does not substitute zeroes.
@@ -77,6 +80,8 @@ All operations APIs are protected by dashboard Basic Auth and return `Cache-Cont
 - `GET /api/operations/feedback?days=90`
 - `GET /api/operations/data-health`
 - `GET /api/operations/health`
+- `GET /api/operations/attribution/campaigns`
+- `POST /api/operations/attribution/campaigns`
 - `GET /api/newsletter/customers/:subscriberId`
 - `/api/newsletter/*` — allowlisted server-side proxy to Newsletter management APIs.
 

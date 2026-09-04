@@ -172,8 +172,14 @@ export async function getSnapshotsCollection() {
   return db.collection("stats_snapshots");
 }
 
+export async function getAttributionCampaignsCollection() {
+  const db = await getDb();
+  return db.collection("attribution_campaigns");
+}
+
 export async function ensureIndexes() {
   const events = await getEventsCollection();
+  const attributionCampaigns = await getAttributionCampaignsCollection();
 
   await Promise.all([
     events.createIndex({ eventId: 1 }, { unique: true, sparse: true }),
@@ -188,5 +194,10 @@ export async function ensureIndexes() {
     events.createIndex({ "user.userId": 1, eventAt: -1 }),
     events.createIndex({ "user.anonymousId": 1, eventAt: -1 }),
     events.createIndex({ source: 1, eventAt: -1 }),
+    attributionCampaigns.createIndex(
+      { utmSource: 1, utmCampaign: 1 },
+      { unique: true }
+    ),
+    attributionCampaigns.createIndex({ createdAt: -1 }),
   ]);
 }
