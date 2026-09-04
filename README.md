@@ -89,9 +89,15 @@ The plugin is never affected by this gate. `POST /api/plugin-analytics/session`,
 - `GET /api/operations/data-health`
 - `GET /api/operations/health`
 - `GET /api/operations/attribution/campaigns`
+- `GET /api/operations/attribution/campaigns?report=true&days=30`
 - `POST /api/operations/attribution/campaigns`
 - `GET /api/newsletter/customers/:subscriberId`
 - `/api/newsletter/*` — allowlisted server-side proxy to Newsletter management APIs.
+
+The attribution report combines tagged landing-page opens with attributed purchase records. It
+shows opens, anonymous unique browsers, checkout attempts, successful purchases, conversion, and
+net revenue by currency. Conversion counts browsers that both opened and purchased within the
+selected reporting window; it does not infer clicks that never reached the Waysorted website.
 
 Credit consumption counts committed reservation lifecycles, excludes released and pending holds, and subtracts compensation credits. Tool attribution uses `toolCode`, then `featureCode`, then the explicit `Unattributed` label.
 

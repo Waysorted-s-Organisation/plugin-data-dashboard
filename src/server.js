@@ -14,6 +14,7 @@ import {
   getEventsCollection,
 } from "./db.js";
 import {
+  attributionCampaignReport,
   createAttributionCampaign,
   listAttributionCampaigns,
 } from "./attribution.js";
@@ -710,10 +711,13 @@ app.get("/api/operations/health", async (_req, res) => {
   } catch (error) { return operationsFailure(res, error); }
 });
 
-app.get("/api/operations/attribution/campaigns", async (_req, res) => {
+app.get("/api/operations/attribution/campaigns", async (req, res) => {
   try {
     await ensureAnalyticsReady();
     res.setHeader("Cache-Control", "no-store");
+    if (req.query.report === "true") {
+      return res.json(await attributionCampaignReport(req.query.days || 30));
+    }
     return res.json(await listAttributionCampaigns());
   } catch (error) {
     return operationsFailure(res, error);

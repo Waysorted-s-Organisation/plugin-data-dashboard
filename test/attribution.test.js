@@ -5,7 +5,7 @@ import { MongoMemoryServer } from "mongodb-memory-server";
 import request from "supertest";
 
 import app from "../src/server.js";
-import { closeDb } from "../src/db.js";
+import { closeDb, getBackendDb } from "../src/db.js";
 
 const basicAuth = "Basic " + Buffer.from("test:test").toString("base64");
 const emailAuth = "Basic " + Buffer.from("anshbhatt140@gmail.com:test").toString("base64");
@@ -15,6 +15,10 @@ test("owner attribution campaign management", async (t) => {
     [
       "MONGODB_URI",
       "MONGODB_DB",
+      "BACKEND_MONGODB_URI",
+      "BACKEND_MONGODB_DB",
+      "BACKEND_ATTRIBUTION_VISITS_COLLECTION",
+      "BACKEND_PURCHASES_COLLECTION",
       "DASHBOARD_BASIC_AUTH_USER",
       "DASHBOARD_BASIC_AUTH_PASS",
       "DASHBOARD_ADMIN_EMAILS",
@@ -24,6 +28,8 @@ test("owner attribution campaign management", async (t) => {
   const mongod = await MongoMemoryServer.create();
   process.env.MONGODB_URI = mongod.getUri("analytics");
   process.env.MONGODB_DB = "analytics";
+  process.env.BACKEND_MONGODB_URI = mongod.getUri("waysorted");
+  process.env.BACKEND_MONGODB_DB = "waysorted";
   process.env.DASHBOARD_BASIC_AUTH_USER = "test";
   process.env.DASHBOARD_BASIC_AUTH_PASS = "test";
   process.env.DASHBOARD_ADMIN_EMAILS = "anshbhatt140@gmail.com";
@@ -57,6 +63,51 @@ test("owner attribution campaign management", async (t) => {
     assert.equal(list.status, 200);
     assert.equal(list.body.items.length, 1);
     assert.equal(list.body.items[0].utmSource, "madhura");
+  });
+
+  await t.test("reports opens, unique visitors, purchases, conversion, and net revenue", async () => {
+    const backend = await getBackendDb();
+    const now = new Date();
+    const visitorA = "01890f47-2d9a-7b56-8abc-1234567890ab";
+    const visitorB = "01890f47-2d9a-7b56-8abc-1234567890ac";
+    await backend.collection("attributionvisits").insertMany([
+      { eventId: "open-1", visitorId: visitorA, utmSource: "madhura", utmCampaign: "checkout", openedAt: now },
+      { eventId: "open-2", visitorId: visitorA, utmSource: "madhura", utmCampaign: "checkout", openedAt: now },
+      { eventId: "open-3", visitorId: visitorB, utmSource: "madhura", utmCampaign: "checkout", openedAt: now },
+    ]);
+    await backend.collection("purchases").insertMany([
+      { status: "captured", amountPaise: 10000, refundedAmountPaise: 1000, currency: "INR", attribution: { utmSource: "madhura", utmCampaign: "checkout", visitorId: visitorA }, createdAt: now },
+      { status: "refunded", amountPaise: 2000, refundedAmountPaise: 2000, currency: "INR", attribution: { utmSource: "madhura", utmCampaign: "checkout", visitorId: visitorB }, createdAt: now },
+      { status: "pending", amountPaise: 5000, refundedAmountPaise: 0, currency: "INR", attribution: { utmSource: "madhura", utmCampaign: "checkout", visitorId: visitorB }, createdAt: now },
+      { status: "failed", amountPaise: 5000, refundedAmountPaise: 0, currency: "INR", attribution: { utmSource: "madhura", utmCampaign: "checkout", visitorId: visitorB }, createdAt: now },
+      { status: "captured", amountPaise: 1000, refundedAmountPaise: 0, currency: "INR", attribution: { utmSource: "madhura", utmCampaign: "checkout", visitorId: "01890f47-2d9a-7b56-8abc-1234567890ad" }, createdAt: now },
+    ]);
+
+    const report = await request(app)
+      .get("/api/operations/attribution/campaigns?report=true&days=30")
+      .set("Authorization", basicAuth);
+    assert.equal(report.status, 200);
+    assert.deepEqual(report.body.summary, {
+      campaigns: 1,
+      opens: 3,
+      uniqueVisitors: 2,
+      checkoutAttempts: 5,
+      successfulPurchases: 3,
+      convertedVisitors: 2,
+      conversionRate: 100,
+      revenue: [{ currency: "INR", amountSubunits: 10000 }],
+    });
+    assert.deepEqual(report.body.items[0].metrics, {
+      opens: 3,
+      uniqueVisitors: 2,
+      checkoutAttempts: 5,
+      successfulPurchases: 3,
+      convertedVisitors: 2,
+      pendingAttempts: 1,
+      failedAttempts: 1,
+      conversionRate: 100,
+      revenue: [{ currency: "INR", amountSubunits: 10000 }],
+    });
   });
 
   await t.test("rejects duplicates and external destinations", async () => {

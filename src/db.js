@@ -131,6 +131,8 @@ export const getBackendStarterGrantsCollection = () =>
   backendCollection("BACKEND_STARTER_GRANTS_COLLECTION", "startergrants");
 export const getBackendPurchasesCollection = () =>
   backendCollection("BACKEND_PURCHASES_COLLECTION", "purchases");
+export const getBackendAttributionVisitsCollection = () =>
+  backendCollection("BACKEND_ATTRIBUTION_VISITS_COLLECTION", "attributionvisits");
 export const getBackendSubscriptionsCollection = () =>
   backendCollection("BACKEND_SUBSCRIPTIONS_COLLECTION", "subscriptions");
 export const getBackendRefundsCollection = () =>

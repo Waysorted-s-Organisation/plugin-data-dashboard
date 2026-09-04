@@ -16,15 +16,20 @@
             <button id="menuToggle" class="icon-button menu-toggle" type="button" aria-label="Open navigation">☰</button>
             <div><p class="overline">Growth operations</p><h1>Attribution</h1><p>Create trackable Waysorted checkout links for partners and campaigns.</p></div>
           </div>
-          <button id="refreshCampaigns" class="button secondary" type="button">Refresh</button>
+          <div class="header-controls">
+            <label class="compact-field">Range<select id="rangeDays"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option><option value="365">365 days</option><option value="all">All time</option></select></label>
+            <button id="refreshCampaigns" class="button secondary" type="button">Refresh</button>
+          </div>
         </header>
 
         <div class="status-bar" aria-live="polite"><span class="status-chip good">Owner-only campaign manager</span><span id="lastUpdated">Loading campaigns</span></div>
         <div id="globalNotice" class="notice error" role="alert" hidden></div>
 
+        <div id="attributionMetrics" class="metric-grid operations-five skeleton-grid" aria-label="Attribution summary"></div>
+
         <div class="content-grid two attribution-layout">
           <section class="surface" aria-labelledby="createTitle">
-            <div class="section-title"><div><p class="overline">New link</p><h2 id="createTitle">Create campaign</h2><p>The UTM values will be saved with a customer’s checkout attribution.</p></div></div>
+            <div class="section-title"><div><p class="overline">New link</p><h2 id="createTitle">Create campaign</h2><p>The tagged visit and any later checkout are connected without storing email or IP address.</p></div></div>
             <form id="campaignForm" class="form-grid">
               <label class="span-two">Campaign name<input id="name" name="name" required maxlength="120" value="Madhura" placeholder="Madhura" /></label>
               <label>UTM source<input id="utmSource" name="utmSource" required maxlength="100" value="madhura" placeholder="madhura" /></label>
@@ -40,15 +45,15 @@
             <p class="overline">How it works</p><h3>Checkout attribution</h3>
             <div class="explanation-list">
               <p><strong>1. Share the link</strong><span>Send the generated checkout URL to the partner or campaign owner.</span></p>
-              <p><strong>2. Visitor opens it</strong><span>Waysorted remembers the latest tagged visit for 30 days.</span></p>
-              <p><strong>3. Purchase is recorded</strong><span>The source, medium, and campaign are attached to the purchase record.</span></p>
+              <p><strong>2. Visitor opens it</strong><span>Each tagged page load is counted. A random browser ID estimates unique visitors; no email or IP is stored.</span></p>
+              <p><strong>3. Purchase is recorded</strong><span>Checkout attempts, successful payments, conversion, and net revenue appear below.</span></p>
             </div>
           </aside>
         </div>
 
         <section aria-labelledby="campaignsTitle">
-          <div class="section-title"><div><p class="overline">Saved links</p><h2 id="campaignsTitle">Campaigns</h2><p>Copy a link whenever you need to share it again.</p></div></div>
-          <article class="surface table-surface"><div class="table-scroll"><table><thead><tr><th>Name</th><th>Source</th><th>Medium</th><th>Campaign</th><th>Created</th><th>Link</th></tr></thead><tbody id="campaignsBody"><tr><td colspan="6"><div class="empty-state">Loading campaigns…</div></td></tr></tbody></table></div></article>
+          <div class="section-title"><div><p class="overline">Campaign performance</p><h2 id="campaignsTitle">Campaigns</h2><p>Opens start accumulating after the website tracker is deployed; earlier page opens cannot be recovered.</p></div></div>
+          <article class="surface table-surface"><div class="table-scroll"><table><thead><tr><th>Campaign</th><th>Link opens</th><th>Unique visitors</th><th>Checkout attempts</th><th>Purchases</th><th>Conversion</th><th>Net revenue</th><th>Link</th></tr></thead><tbody id="campaignsBody"><tr><td colspan="8"><div class="empty-state">Loading campaigns…</div></td></tr></tbody></table></div></article>
         </section>
       </main>
     </div>
