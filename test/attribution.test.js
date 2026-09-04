@@ -11,6 +11,16 @@ const basicAuth = "Basic " + Buffer.from("test:test").toString("base64");
 const emailAuth = "Basic " + Buffer.from("anshbhatt140@gmail.com:test").toString("base64");
 
 test("owner attribution campaign management", async (t) => {
+  const previousEnvironment = Object.fromEntries(
+    [
+      "MONGODB_URI",
+      "MONGODB_DB",
+      "DASHBOARD_BASIC_AUTH_USER",
+      "DASHBOARD_BASIC_AUTH_PASS",
+      "DASHBOARD_ADMIN_EMAILS",
+      "WAYSORTED_PUBLIC_URL",
+    ].map((name) => [name, process.env[name]])
+  );
   const mongod = await MongoMemoryServer.create();
   process.env.MONGODB_URI = mongod.getUri("analytics");
   process.env.MONGODB_DB = "analytics";
@@ -18,7 +28,14 @@ test("owner attribution campaign management", async (t) => {
   process.env.DASHBOARD_BASIC_AUTH_PASS = "test";
   process.env.DASHBOARD_ADMIN_EMAILS = "anshbhatt140@gmail.com";
   process.env.WAYSORTED_PUBLIC_URL = "https://www.waysorted.com";
-  t.after(async () => { await closeDb(); await mongod.stop(); });
+  t.after(async () => {
+    await closeDb();
+    await mongod.stop();
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
 
   await t.test("requires dashboard authentication", async () => {
     const response = await request(app).get("/api/operations/attribution/campaigns");

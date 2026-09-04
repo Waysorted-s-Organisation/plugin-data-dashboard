@@ -26,6 +26,7 @@ import {
   operationsHealth,
   recentUsers,
 } from "./operations.js";
+import { usersSheetExport } from "./sheet-export.js";
 import {
   productCommercial,
   productDataHealth,
@@ -36,7 +37,34 @@ import {
   productTools,
   productUserDetail,
   productUsers,
+  NON_PERSISTED_EVENT_TYPES,
+  SEMANTIC_EVENT_TYPES,
 } from "./product-intelligence.js";
+
+/**
+ * Shared vocabulary between the ingest and the aggregations. Events outside it
+ * are still stored — they are simply flagged so consumers can choose between
+ * the curated set and the complete record.
+ */
+const SEMANTIC_EVENT_TYPE_SET = new Set(SEMANTIC_EVENT_TYPES);
+const NON_PERSISTED_EVENT_TYPE_SET = new Set(NON_PERSISTED_EVENT_TYPES);
+
+/**
+ * Whether repetitive, information-free traffic (heartbeats, transport config
+ * changes) is persisted.
+ *
+ * Defaults to false, matching the documented contract: these are excluded from
+ * every metric anyway, so storing a heartbeat every 30 seconds per open plugin
+ * only grows the collection. Set to true temporarily when debugging a plugin
+ * build, where the heartbeat's queue depth and uptime are the useful signal.
+ *
+ * This is deliberately narrower than PASSIVE_EVENT_TYPES: events such as
+ * backend_operation and user_context_changed do not count as user activity but
+ * are still evidence of what happened, so they are always stored.
+ */
+function storePassiveEvents() {
+  return String(process.env.ANALYTICS_STORE_PASSIVE_EVENTS || "").trim().toLowerCase() === "true";
+}
 
 dotenv.config();
 
@@ -103,21 +131,39 @@ function anonymousId(seed) {
 
 function normalizeUser(value, fallbackSeed) {
   const user = value && typeof value === "object" ? value : {};
-  const inferredId = safeString(user.userId || user.id || user._id || user.email, 180);
-  const isAuthenticated = typeof user.isAuthenticated === "boolean"
-    ? user.isAuthenticated
-    : Boolean(inferredId || user.email);
+  // Email is excluded from the id resolution on purpose. It used to be the last
+  // fallback, so user.userId held an account id on some events and an email
+  // address on others; the same person then resolved to two identities and
+  // neither joined reliably against the backend users collection. Email is
+  // still captured in its own field below and can be resolved to a real user
+  // record there.
+  const inferredId = safeString(user.userId || user.id || user._id, 180);
+  const inferredEmail = safeString(user.email, 200);
+  // An identifier the plugin actually sent is evidence, and outranks a flag
+  // that says otherwise. The flag used to decide alone, and it is set from the
+  // plugin's own auth state machine — which lags the token it already holds, so
+  // the opening events of every launch arrived as isAuthenticated:false while
+  // carrying a real account id. Those ids were then blanked on the way in and
+  // the person became a signed-out visitor in their own session.
+  const identified = Boolean(inferredId || inferredEmail);
+  const isAuthenticated = identified || user.isAuthenticated === true;
   const creditValue = Number(
     user.creditsRemaining ?? user.billing?.wallet?.availableCredits
   );
   return {
     isAuthenticated,
-    userId: isAuthenticated ? inferredId : null,
-    anonymousId: isAuthenticated
+    // Never discarded once sent. Blanking them on the strength of the flag threw
+    // away the only join the dashboard has.
+    userId: inferredId,
+    anonymousId: identified
       ? null
       : safeString(user.anonymousId || user.anonId, 180) || anonymousId(fallbackSeed),
-    name: isAuthenticated ? safeString(user.name, 160) : null,
-    email: isAuthenticated ? safeString(user.email, 200) : null,
+    // Kept for signed-out visitors too. Figma exposes their display name to
+    // the plugin and names them in the publisher's usage notifications, so
+    // discarding it here left a visitor recognisable in Figma but anonymous in
+    // the dashboard — which is the gap that made them unreachable.
+    name: safeString(user.name, 160),
+    email: inferredEmail,
     identitySource: safeString(user.identitySource, 80) || (isAuthenticated ? "authenticated" : "anonymous"),
     creditsRemaining: Number.isFinite(creditValue) ? Math.max(0, creditValue) : null,
   };
@@ -131,6 +177,54 @@ function newsletterConfig() {
   };
 }
 
+/**
+ * Whether an unauthenticated dashboard is a deliberate choice.
+ *
+ * Local development is the only legitimate reason to run without credentials,
+ * and `npm run dev` sets this. It is deliberately NOT in `.env.example`: that
+ * file gets copied onto servers, and an escape hatch that travels with it is
+ * the same hole under a different name.
+ */
+function allowsUnauthenticated() {
+  return String(process.env.ALLOW_UNAUTHENTICATED || "").trim().toLowerCase() === "true";
+}
+
+let warnedAboutMissingCredentials = false;
+
+/**
+ * Constant-time credential comparison.
+ *
+ * timingSafeEqual requires equal lengths and throws otherwise, which would leak
+ * the length it refused to compare, so both sides are hashed to a fixed width
+ * first.
+ */
+function matchesSecret(supplied, expected) {
+  const digest = (value) => crypto.createHash("sha256").update(String(value), "utf8").digest();
+  return crypto.timingSafeEqual(digest(supplied), digest(expected));
+}
+
+/**
+ * The only authentication in front of the operations APIs, the newsletter
+ * proxy and the dashboard UI.
+ *
+ * It used to call next() when either credential was empty, and `.env.example`
+ * ships both empty — so a deployment that followed the README's copy-the-example
+ * setup served the entire customer database, and a proxy holding a privileged
+ * mass-send token, to anyone who knew the URL. Nothing said so: no error, no log
+ * line, no startup check. Production had the credentials set and was never
+ * exposed, but the failure mode is silent, so a rename, a lost environment or a
+ * fresh preview project reopens everything without a signal.
+ *
+ * It now refuses to serve instead. 503 rather than 401 because the problem is
+ * the deployment, not the caller — there are no credentials for them to send.
+ *
+ * The `WWW-Authenticate` realm below must not change: browsers cache Basic
+ * credentials per realm, and renaming it signs every existing operator out.
+ *
+ * Everything the plugin depends on — the analytics session exchange, the ingest
+ * endpoint — and the public `/health` check are all registered ahead of this
+ * middleware, so refusing here cannot interrupt telemetry or health probes.
+ */
 function readAuthGate(req, res, next) {
   const expectedUser = String(process.env.DASHBOARD_BASIC_AUTH_USER || "").trim();
   const expectedPass = String(process.env.DASHBOARD_BASIC_AUTH_PASS || "").trim();
@@ -140,7 +234,24 @@ function readAuthGate(req, res, next) {
     .split(",")
     .map((email) => email.trim().toLowerCase())
     .filter(Boolean);
-  if (!expectedUser || !expectedPass) return next();
+  if (!expectedUser || !expectedPass) {
+    if (allowsUnauthenticated()) {
+      if (!warnedAboutMissingCredentials) {
+        warnedAboutMissingCredentials = true;
+        console.warn(
+          "ALLOW_UNAUTHENTICATED=true: serving the dashboard and every operations API without authentication. Never set this outside local development."
+        );
+      }
+      return next();
+    }
+    if (!warnedAboutMissingCredentials) {
+      warnedAboutMissingCredentials = true;
+      console.error(
+        "DASHBOARD_BASIC_AUTH_USER and DASHBOARD_BASIC_AUTH_PASS are not configured. Refusing to serve the dashboard, the operations APIs and the newsletter proxy. Set both, or set ALLOW_UNAUTHENTICATED=true for local development."
+      );
+    }
+    return res.status(503).json({ error: "Dashboard authentication is not configured" });
+  }
   const authorization = String(req.headers.authorization || "");
   if (!authorization.startsWith("Basic ")) {
     res.setHeader("WWW-Authenticate", 'Basic realm="Waysorted Operations"');
@@ -150,8 +261,14 @@ function readAuthGate(req, res, next) {
   const separator = decoded.indexOf(":");
   const user = separator >= 0 ? decoded.slice(0, separator) : "";
   const pass = separator >= 0 ? decoded.slice(separator + 1) : "";
-  const allowedUser = user === expectedUser || adminEmails.includes(user.toLowerCase());
-  if (!allowedUser || pass !== expectedPass) {
+  // Both halves are always compared, so the answer does not arrive sooner for a
+  // wrong username than for a wrong password.
+  const userMatches = [expectedUser, ...adminEmails].reduce(
+    (matched, candidate) => matchesSecret(user.toLowerCase(), candidate.toLowerCase()) || matched,
+    false
+  );
+  const passMatches = matchesSecret(pass, expectedPass);
+  if (!userMatches || !passMatches) {
     return res.status(403).json({ error: "Invalid credentials" });
   }
   return next();
@@ -263,6 +380,14 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
         sessionId,
         deviceId,
         eventType,
+        // Emitters from schemaVersion 2 onward send every event and mark which
+        // belong to the curated semantic vocabulary. Events from older builds
+        // predate the flag but were filtered to semantic types before sending,
+        // so they are semantic by construction.
+        isSemantic:
+          typeof event?.isSemantic === "boolean"
+            ? event.isSemantic
+            : SEMANTIC_EVENT_TYPE_SET.has(eventType),
         eventAt,
         receivedAt: now,
         source: safeString(event?.source, 80) || envelope.source,
@@ -273,8 +398,28 @@ app.post("/api/plugin-analytics/ingest", ingestAuthGate, async (req, res) => {
         plugin: envelope.plugin,
       };
     });
-    const result = await (await getEventsCollection()).bulkWrite(documents.map((document) => ({ updateOne: { filter: { eventId: document.eventId }, update: { $setOnInsert: document }, upsert: true } })), { ordered: false });
-    return res.status(202).json({ accepted: documents.length, inserted: result.upsertedCount, duplicates: documents.length - result.upsertedCount });
+    // Passive events are dropped before the write unless explicitly enabled.
+    // They are excluded from every metric regardless, so persisting them only
+    // grows the collection — but the counts are still reported so a plugin
+    // build emitting nothing but noise is visible without storing the noise.
+    const keepPassive = storePassiveEvents();
+    const stored = keepPassive
+      ? documents
+      : documents.filter((document) => !NON_PERSISTED_EVENT_TYPE_SET.has(document.eventType));
+    const dropped = documents.length - stored.length;
+    const dropReasons = dropped ? { non_persisted_event_type: dropped } : {};
+
+    const result = stored.length
+      ? await (await getEventsCollection()).bulkWrite(stored.map((document) => ({ updateOne: { filter: { eventId: document.eventId }, update: { $setOnInsert: document }, upsert: true } })), { ordered: false })
+      : { upsertedCount: 0 };
+    return res.status(202).json({
+      accepted: documents.length,
+      stored: stored.length,
+      inserted: result.upsertedCount,
+      duplicates: stored.length - result.upsertedCount,
+      dropped,
+      dropReasons,
+    });
   } catch (error) {
     console.error("Analytics ingest failed:", error?.message || error);
     return res.status(500).json({ error: "Failed to ingest analytics events" });
@@ -538,6 +683,25 @@ app.get("/api/operations/data-health", async (_req, res) => {
   }
   catch (error) { return operationsFailure(res, error); }
 });
+/**
+ * The Users tab of the conversion tracker, ready to write.
+ *
+ * Behind the same gate as every other operations API, so the sheet's sync
+ * script authenticates the same way a person does. It returns only the columns
+ * the dashboard owns; the acquisition source and the whole Activity Log belong
+ * to whoever is doing the outreach and are named in `humanOwnedColumns` so a
+ * writer cannot quietly claim them.
+ */
+app.get("/api/exports/users-sheet", async (req, res) => {
+  try {
+    res.setHeader("Cache-Control", "no-store");
+    return res.json(await usersSheetExport({ days: req.query.days || 30 }));
+  } catch (error) {
+    console.error("Users sheet export failed:", error?.message || error);
+    return res.status(503).json({ error: "Operations data is unavailable" });
+  }
+});
+
 app.get("/api/operations/health", async (_req, res) => {
   try {
     const newsletter = newsletterConfig();

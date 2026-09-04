@@ -39,16 +39,37 @@ export function median(values) {
   return numbers.length % 2 ? numbers[middle] : (numbers[middle - 1] + numbers[middle]) / 2;
 }
 
+/**
+ * Plugin surfaces that are not tools.
+ *
+ * The plugin stamps a `tool` on every event, defaulting to the surface the user
+ * is currently on, so session, heartbeat and analytics-plumbing events all
+ * carry one of these. They are navigation chrome and a game, not products, and
+ * must never appear on the tools page or in tool totals.
+ */
+export const NON_TOOL_SURFACES = new Set([
+  "dashboard",
+  "collapsed-dashboard",
+  "profile",
+  "wayfall-game",
+  "liquid-glass",
+  "unattributed",
+  "unknown",
+]);
+
 export function normalizeToolCode(code, featureCode = null) {
   const raw = String(code || featureCode || "unattributed").trim().toLowerCase();
-  if (raw === "frame_gallery" || raw === "frames" || raw === "frames-to-pdf") {
-    return { key: "frames-to-pdf", label: "Frames to PDF", feature: featureCode || null };
+  // "frame-gallery" is the code the plugin emits; "frame_gallery" is what usage
+  // reservations record. Omitting the hyphenated form split one product into
+  // two dashboard rows and double counted its users and jobs.
+  if (raw === "frame_gallery" || raw === "frame-gallery" || raw === "frames" || raw === "frames-to-pdf") {
+    return { key: "frames-to-pdf", label: "Frames to PDF", feature: featureCode || null, known: true };
   }
   if (raw === "unit_converter" || raw === "unit-converter") {
-    return { key: "unit-converter", label: "Unit Converter", feature: featureCode || null };
+    return { key: "unit-converter", label: "Unit Converter", feature: featureCode || null, known: true };
   }
   if (["pdf", "psd", "eps", "ai", "import-tool", "file-importer"].includes(raw)) {
-    return { key: "file-importer", label: "File Importer", feature: raw };
+    return { key: "file-importer", label: "File Importer", feature: raw, known: true };
   }
   const known = {
     palettable: "Palettable",
@@ -57,10 +78,13 @@ export function normalizeToolCode(code, featureCode = null) {
     "comment-summarizer": "Comment Summarizer",
     "comment-summariser": "Comment Summarizer",
   };
-  if (known[raw]) return { key: raw.replace("summariser", "summarizer"), label: known[raw], feature: featureCode || null };
-  if (raw === "unattributed") return { key: raw, label: "Unattributed", feature: null };
+  if (known[raw]) return { key: raw.replace("summariser", "summarizer"), label: known[raw], feature: featureCode || null, known: true };
+  if (raw === "unattributed") return { key: raw, label: "Unattributed", feature: null, known: false };
   const label = raw.replaceAll(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
-  return { key: raw, label, feature: featureCode || null };
+  // `known: false` says the label below was title-cased from an unrecognised
+  // code rather than looked up. A caller deciding whether a string names a
+  // product — a feedback path, say — must be able to tell the difference.
+  return { key: raw, label, feature: featureCode || null, known: false };
 }
 
 export function loginAt(session) {

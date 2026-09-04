@@ -144,7 +144,26 @@ export const getBackendFeatureRequestsCollection = () =>
 export const getBackendToolsCollection = () =>
   backendCollection("BACKEND_TOOLS_COLLECTION", "tools");
 
+/**
+ * Callbacks run when the database connections are torn down.
+ *
+ * Exists so cached derived state can be invalidated without db.js importing
+ * the modules that hold it, which would be a circular import.
+ */
+const dbCloseListeners = new Set();
+
+export function onDbClose(listener) {
+  if (typeof listener === "function") dbCloseListeners.add(listener);
+}
+
 export async function closeDb() {
+  for (const listener of dbCloseListeners) {
+    try {
+      listener();
+    } catch (error) {
+      console.error("Database close listener failed:", error?.message || error);
+    }
+  }
   if (cachedClient) {
     await cachedClient.close();
   }
@@ -192,7 +211,11 @@ export async function ensureIndexes() {
     events.createIndex({ "payload.type": 1, eventAt: -1 }),
     events.createIndex({ "payload.interactionAction": 1, eventAt: -1 }),
     events.createIndex({ "user.userId": 1, eventAt: -1 }),
+    // Identity resolution reads email before account id, and groups anonymous
+    // traffic by device, so both need to be servable without a collection scan.
+    events.createIndex({ "user.email": 1, eventAt: -1 }),
     events.createIndex({ "user.anonymousId": 1, eventAt: -1 }),
+    events.createIndex({ deviceId: 1, eventAt: -1 }),
     events.createIndex({ source: 1, eventAt: -1 }),
     attributionCampaigns.createIndex(
       { utmSource: 1, utmCampaign: 1 },
