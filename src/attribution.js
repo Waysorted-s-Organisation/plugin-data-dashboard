@@ -1,4 +1,8 @@
-import { getAttributionCampaignsCollection } from "./db.js";
+import {
+  getAttributionCampaignsCollection,
+  getBackendAttributionVisitsCollection,
+  getBackendPurchasesCollection,
+} from "./db.js";
 
 const DEFAULT_PUBLIC_URL = "https://www.waysorted.com";
 
@@ -73,6 +77,175 @@ export async function listAttributionCampaigns() {
   const campaigns = await getAttributionCampaignsCollection();
   const items = await campaigns.find({}).sort({ createdAt: -1 }).limit(500).toArray();
   return { items: items.map(serializeCampaign), publicOrigin: publicWaysortedOrigin() };
+}
+
+function reportStart(days) {
+  if (String(days).toLowerCase() === "all") return { days: "all", start: null };
+  const parsed = Number(days);
+  const safeDays = [7, 30, 90, 365].includes(parsed) ? parsed : 30;
+  return {
+    days: safeDays,
+    start: new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000),
+  };
+}
+
+function campaignKey(source, campaign) {
+  return `${String(source || "").trim().toLowerCase()}\u0000${String(campaign || "").trim().toLowerCase()}`;
+}
+
+function percent(numerator, denominator) {
+  return denominator ? Math.round((numerator / denominator) * 1000) / 10 : 0;
+}
+
+export async function attributionCampaignReport(days = 30) {
+  const range = reportStart(days);
+  const [campaignsCollection, visitsCollection, purchasesCollection] = await Promise.all([
+    getAttributionCampaignsCollection(),
+    getBackendAttributionVisitsCollection(),
+    getBackendPurchasesCollection(),
+  ]);
+  const campaignDocuments = await campaignsCollection.find({}).sort({ createdAt: -1 }).limit(500).toArray();
+  const visitMatch = range.start ? { openedAt: { $gte: range.start } } : {};
+  const purchaseMatch = {
+    "attribution.utmSource": { $type: "string" },
+    ...(range.start ? { createdAt: { $gte: range.start } } : {}),
+  };
+  const successfulStatuses = ["captured", "partially_refunded", "refunded"];
+  const pendingStatuses = ["created", "pending"];
+  const failedStatuses = ["failed", "cancelled"];
+
+  const [visitRows, purchaseRows] = await Promise.all([
+    visitsCollection.aggregate([
+      { $match: visitMatch },
+      {
+        $group: {
+          _id: {
+            source: { $toLower: { $ifNull: ["$utmSource", ""] } },
+            campaign: { $toLower: { $ifNull: ["$utmCampaign", ""] } },
+          },
+          opens: { $sum: 1 },
+          visitorIds: { $addToSet: "$visitorId" },
+        },
+      },
+    ]).toArray(),
+    purchasesCollection.aggregate([
+      { $match: purchaseMatch },
+      {
+        $group: {
+          _id: {
+            source: { $toLower: { $ifNull: ["$attribution.utmSource", ""] } },
+            campaign: { $toLower: { $ifNull: ["$attribution.utmCampaign", ""] } },
+            currency: { $toUpper: { $ifNull: ["$currency", "INR"] } },
+          },
+          checkoutAttempts: { $sum: 1 },
+          successfulPurchases: { $sum: { $cond: [{ $in: ["$status", successfulStatuses] }, 1, 0] } },
+          pendingAttempts: { $sum: { $cond: [{ $in: ["$status", pendingStatuses] }, 1, 0] } },
+          failedAttempts: { $sum: { $cond: [{ $in: ["$status", failedStatuses] }, 1, 0] } },
+          successfulVisitorIds: {
+            $addToSet: {
+              $cond: [
+                { $in: ["$status", successfulStatuses] },
+                { $ifNull: ["$attribution.visitorId", null] },
+                null,
+              ],
+            },
+          },
+          netRevenueSubunits: {
+            $sum: {
+              $cond: [
+                { $in: ["$status", successfulStatuses] },
+                { $max: [{ $subtract: [{ $ifNull: ["$amountPaise", 0] }, { $ifNull: ["$refundedAmountPaise", 0] }] }, 0] },
+                0,
+              ],
+            },
+          },
+        },
+      },
+    ]).toArray(),
+  ]);
+
+  const visitsByCampaign = new Map(
+    visitRows.map((row) => [campaignKey(row._id?.source, row._id?.campaign), row]),
+  );
+  const purchasesByCampaign = new Map();
+  for (const row of purchaseRows) {
+    const key = campaignKey(row._id?.source, row._id?.campaign);
+    const current = purchasesByCampaign.get(key) || {
+      checkoutAttempts: 0,
+      successfulPurchases: 0,
+      pendingAttempts: 0,
+      failedAttempts: 0,
+      successfulVisitorIds: new Set(),
+      revenue: [],
+    };
+    current.checkoutAttempts += Number(row.checkoutAttempts || 0);
+    current.successfulPurchases += Number(row.successfulPurchases || 0);
+    current.pendingAttempts += Number(row.pendingAttempts || 0);
+    current.failedAttempts += Number(row.failedAttempts || 0);
+    for (const visitorId of row.successfulVisitorIds || []) {
+      if (visitorId) current.successfulVisitorIds.add(String(visitorId));
+    }
+    if (Number(row.netRevenueSubunits || 0)) {
+      current.revenue.push({
+        currency: row._id?.currency || "INR",
+        amountSubunits: Number(row.netRevenueSubunits),
+      });
+    }
+    purchasesByCampaign.set(key, current);
+  }
+
+  const allVisitors = new Set();
+  const allConvertedVisitors = new Set();
+  const summaryRevenue = new Map();
+  const items = campaignDocuments.map((document) => {
+    const campaign = serializeCampaign(document);
+    const key = campaignKey(campaign.utmSource, campaign.utmCampaign);
+    const visits = visitsByCampaign.get(key);
+    const purchases = purchasesByCampaign.get(key);
+    const visitorIds = (visits?.visitorIds || []).filter(Boolean).map(String);
+    visitorIds.forEach((id) => allVisitors.add(id));
+    const openedVisitorIds = new Set(visitorIds);
+    const convertedVisitorIds = Array.from(purchases?.successfulVisitorIds || [])
+      .filter((id) => openedVisitorIds.has(id));
+    convertedVisitorIds.forEach((id) => allConvertedVisitors.add(id));
+    for (const value of purchases?.revenue || []) {
+      summaryRevenue.set(value.currency, (summaryRevenue.get(value.currency) || 0) + value.amountSubunits);
+    }
+    const uniqueVisitors = visitorIds.length;
+    const convertedVisitors = convertedVisitorIds.length;
+    return {
+      ...campaign,
+      metrics: {
+        opens: Number(visits?.opens || 0),
+        uniqueVisitors,
+        checkoutAttempts: purchases?.checkoutAttempts || 0,
+        successfulPurchases: purchases?.successfulPurchases || 0,
+        convertedVisitors,
+        pendingAttempts: purchases?.pendingAttempts || 0,
+        failedAttempts: purchases?.failedAttempts || 0,
+        conversionRate: percent(convertedVisitors, uniqueVisitors),
+        revenue: [...(purchases?.revenue || [])].sort((a, b) => a.currency.localeCompare(b.currency)),
+      },
+    };
+  });
+
+  return {
+    asOf: new Date(),
+    period: { days: range.days, start: range.start },
+    summary: {
+      campaigns: items.length,
+      opens: items.reduce((sum, item) => sum + item.metrics.opens, 0),
+      uniqueVisitors: allVisitors.size,
+      checkoutAttempts: items.reduce((sum, item) => sum + item.metrics.checkoutAttempts, 0),
+      successfulPurchases: items.reduce((sum, item) => sum + item.metrics.successfulPurchases, 0),
+      convertedVisitors: allConvertedVisitors.size,
+      conversionRate: percent(allConvertedVisitors.size, allVisitors.size),
+      revenue: Array.from(summaryRevenue, ([currency, amountSubunits]) => ({ currency, amountSubunits }))
+        .sort((a, b) => a.currency.localeCompare(b.currency)),
+    },
+    items,
+    publicOrigin: publicWaysortedOrigin(),
+  };
 }
 
 export async function createAttributionCampaign(input, createdBy = null) {
