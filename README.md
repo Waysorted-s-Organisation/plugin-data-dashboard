@@ -131,7 +131,7 @@ Never written: the **Activity Log** tab (outreach notes are written by people) a
 
 1. Extensions → Apps Script, paste the file, save.
 2. Project Settings → Script Properties, add `DASHBOARD_URL`, `DASHBOARD_USER`, `DASHBOARD_PASS`, and press **Save script properties**. `DASHBOARD_USER`/`DASHBOARD_PASS` are the values of `DASHBOARD_BASIC_AUTH_USER`/`DASHBOARD_BASIC_AUTH_PASS` from the deployment. Run `showScriptProperties` if a name is rejected — it lists what is actually saved, and the character count of each value, without printing the password.
-3. Run `removePlaceholderRows` once to clear the shipped Alice/Bob rows.
+3. Run `removePlaceholderRows` once to clear the shipped Alice/Bob rows. The target tab is found by its header row rather than its name, so renaming it does not break the sync; set `USERS_SHEET_NAME` only if two tabs carry the same columns.
 4. Run `syncUsersSheet` once to backfill.
 5. Run `installDailyTrigger` once for the 06:00 daily run.
 
