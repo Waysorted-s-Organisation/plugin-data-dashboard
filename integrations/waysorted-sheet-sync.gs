@@ -30,7 +30,6 @@
  */
 
 var PROPS = PropertiesService.getScriptProperties();
-var SHEET_NAME = 'Users';
 var HEADER_ROWS = 1;
 var EMAIL_COLUMN = 3; // C
 var SOURCE_COLUMN = 5; // E — human owned, never written
@@ -147,6 +146,72 @@ function fetchExport() {
  * difference between two seconds and a timeout.
  */
 /**
+ * The tab holding the account table, whatever it is called today.
+ *
+ * This used to be the hard-coded string "Users". Someone renamed the tab to
+ * "Signedup Users" — a perfectly reasonable thing to do to your own
+ * spreadsheet — and every run from that morning on died at the name lookup. The
+ * daily trigger kept firing and kept failing, silently, for days.
+ *
+ * A tab's name belongs to the people using the sheet. Its COLUMNS are the
+ * contract, so those are what this matches on: any tab whose header row carries
+ * the fields this sync writes is the right tab, under any name. An explicit
+ * USERS_SHEET_NAME property still wins, for the case where two tabs legitimately
+ * look alike.
+ */
+var SHEET_NAME_HINTS = ['Signedup Users', 'Signed-up Users', 'Users'];
+var REQUIRED_HEADERS = ['user id', 'email', 'signup date', 'liked feature'];
+
+function sheetHeaders(sheet) {
+  if (sheet.getLastColumn() < 1) return [];
+  return sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(function (value) {
+    return String(value === null || value === undefined ? '' : value).trim().toLowerCase();
+  });
+}
+
+function looksLikeUsersSheet(sheet) {
+  var headers = sheetHeaders(sheet);
+  for (var i = 0; i < REQUIRED_HEADERS.length; i++) {
+    if (headers.indexOf(REQUIRED_HEADERS[i]) < 0) return false;
+  }
+  return true;
+}
+
+function resolveUsersSheet(spreadsheet) {
+  var names = spreadsheet.getSheets().map(function (sheet) { return '"' + sheet.getName() + '"'; }).join(', ');
+
+  var configured = String(PROPS.getProperty('USERS_SHEET_NAME') || '').trim();
+  if (configured) {
+    var named = spreadsheet.getSheetByName(configured);
+    if (named) return named;
+    throw new Error(
+      'USERS_SHEET_NAME is set to "' + configured + '", but no tab has that name. Tabs in this spreadsheet: ' +
+      names + '. Fix the property or clear it to match by columns instead.'
+    );
+  }
+
+  var matches = spreadsheet.getSheets().filter(looksLikeUsersSheet);
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    // Ambiguous on columns alone, so a familiar name breaks the tie.
+    for (var h = 0; h < SHEET_NAME_HINTS.length; h++) {
+      for (var m = 0; m < matches.length; m++) {
+        if (matches[m].getName() === SHEET_NAME_HINTS[h]) return matches[m];
+      }
+    }
+    throw new Error(
+      'More than one tab has the account columns and none is named as expected: ' +
+      matches.map(function (sheet) { return '"' + sheet.getName() + '"'; }).join(', ') +
+      '. Set the USERS_SHEET_NAME script property to the one to write.'
+    );
+  }
+  throw new Error(
+    'No tab has the account columns (' + REQUIRED_HEADERS.join(', ') + ') in row 1. Tabs in this spreadsheet: ' +
+    names + '. Check the header row, or set the USERS_SHEET_NAME script property.'
+  );
+}
+
+/**
  * The values a column's dropdown will accept, or null if it accepts anything.
  *
  * Read from the sheet rather than hard-coded, so the list stays whatever its
@@ -207,10 +272,12 @@ function indexExistingRows(sheet) {
 }
 
 function syncUsersSheet() {
-  var payload = fetchExport();
+  // Resolved BEFORE the export is fetched. The old order spent thirty seconds
+  // downloading data it was about to throw away, so every failure looked like a
+  // network problem rather than the one-word naming problem it was.
   var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = spreadsheet.getSheetByName(SHEET_NAME);
-  if (!sheet) throw new Error('No sheet named "' + SHEET_NAME + '" in this spreadsheet.');
+  var sheet = resolveUsersSheet(spreadsheet);
+  var payload = fetchExport();
 
   var existing = indexExistingRows(sheet);
   var appendAt = Math.max(sheet.getLastRow(), HEADER_ROWS) + 1;
@@ -275,8 +342,7 @@ function syncUsersSheet() {
  * ends in @example.com so a real row typed in early is never caught by it.
  */
 function removePlaceholderRows() {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
-  if (!sheet) throw new Error('No sheet named "' + SHEET_NAME + '".');
+  var sheet = resolveUsersSheet(SpreadsheetApp.getActiveSpreadsheet());
   var lastRow = sheet.getLastRow();
   if (lastRow <= HEADER_ROWS) return 'Nothing to remove.';
   var emails = sheet.getRange(HEADER_ROWS + 1, EMAIL_COLUMN, lastRow - HEADER_ROWS, 1).getValues();
@@ -301,12 +367,37 @@ function installDailyTrigger() {
   return 'Daily sync installed for 06:00 ' + Session.getScriptTimeZone() + '.';
 }
 
+/**
+ * Runs a menu action and says what happened.
+ *
+ * Picking a menu item used to produce no visible result at all — the functions
+ * logged their outcome and returned it, and Sheets showed nothing either way.
+ * A successful sync and a sync that died on the first line looked identical
+ * from the spreadsheet, which is how a daily failure went unnoticed for a week.
+ */
+function runFromMenu(label, action) {
+  var ui = SpreadsheetApp.getUi();
+  try {
+    var result = action();
+    SpreadsheetApp.getActiveSpreadsheet().toast(String(result), label, 30);
+    return result;
+  } catch (error) {
+    ui.alert(label + ' failed', String(error && error.message ? error.message : error), ui.ButtonSet.OK);
+    throw error;
+  }
+}
+
+function menuSyncUsers() { return runFromMenu('Waysorted sync', syncUsersSheet); }
+function menuRemovePlaceholders() { return runFromMenu('Placeholder cleanup', removePlaceholderRows); }
+function menuInstallDailyTrigger() { return runFromMenu('Daily sync', installDailyTrigger); }
+function menuShowSettings() { return runFromMenu('Settings', showScriptProperties); }
+
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Waysorted')
-    .addItem('Sync users now', 'syncUsersSheet')
-    .addItem('Remove placeholder rows', 'removePlaceholderRows')
-    .addItem('Install daily sync', 'installDailyTrigger')
-    .addItem('Check settings', 'showScriptProperties')
+    .addItem('Sync users now', 'menuSyncUsers')
+    .addItem('Remove placeholder rows', 'menuRemovePlaceholders')
+    .addItem('Install daily sync', 'menuInstallDailyTrigger')
+    .addItem('Check settings', 'menuShowSettings')
     .addToUi();
 }
